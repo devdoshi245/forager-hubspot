@@ -30,8 +30,9 @@ It can:
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/health` | Health check |
-| POST | `/webhook/company` | HubSpot company-created webhook |
-| POST | `/webhook/contact` | HubSpot contact-created webhook |
+| POST | `/webhook` | **HubSpot webhook Target URL** — routes company + contact events |
+| POST | `/webhook/company` | Company-created handler (also callable directly) |
+| POST | `/webhook/contact` | Contact-created handler (also callable directly) |
 | POST | `/enrich/company` | Manual: `{"company_id": "123"}` |
 | POST | `/enrich/contact` | Manual: `{"contact_id": "123"}` |
 | POST | `/enrich/find-contacts` | Manual: `{"company_id","company_domain","job_title_filter","max_contacts"}` |
@@ -82,5 +83,7 @@ docs:
 ## Deployment (Railway)
 
 The `Procfile` runs `gunicorn main:app`. Set the three environment variables in
-the Railway dashboard, deploy, then register the two HubSpot webhooks against
-`/webhook/company` and `/webhook/contact`.
+the Railway dashboard, deploy, then point your HubSpot Private App's single
+webhook **Target URL** at `https://<your-app>.up.railway.app/webhook` — it routes
+company and contact events automatically (HubSpot only allows one Target URL
+per app).

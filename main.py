@@ -48,6 +48,7 @@ def index():
         "status": "running",
         "endpoints": [
             "GET  /health",
+            "POST /webhook  (HubSpot single target URL - routes all events)",
             "POST /webhook/company",
             "POST /webhook/contact",
             "POST /enrich/company",
@@ -61,6 +62,34 @@ def index():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
+
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    """Unified HubSpot webhook endpoint.
+
+    A HubSpot Private App posts EVERY event subscription to a single Target URL,
+    so we route each event to the right handler by its subscriptionType
+    (e.g. 'company.creation' vs 'contact.creation')."""
+    payload = request.get_json(force=True, silent=True) or []
+    logger.info("/webhook received %d event(s): %s", len(payload), payload)
+    job_title_filter = request.args.get("job_title_filter")
+    results = []
+    for event in payload:
+        object_id = str(event.get("objectId", ""))
+        subscription = (event.get("subscriptionType") or "").lower()
+        if not object_id:
+            continue
+        if subscription.startswith("company"):
+            results.append({"type": "company", "objectId": object_id,
+                            "result": enrichment.handle_company_webhook(object_id, job_title_filter)})
+        elif subscription.startswith("contact"):
+            results.append({"type": "contact", "objectId": object_id,
+                            "result": enrichment.handle_contact_webhook(object_id)})
+        else:
+            results.append({"type": "unknown", "objectId": object_id,
+                            "subscriptionType": subscription, "skipped": True})
+    return jsonify(results), 200
 
 
 @app.route("/webhook/company", methods=["POST"])
