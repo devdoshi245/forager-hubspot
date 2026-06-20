@@ -1,0 +1,170 @@
+"""
+enrichment.py
+-------------
+Business logic: orchestrates Forager lookups and HubSpot writes.
+
+Five capabilities:
+  enrich_company           - fill a HubSpot company from Forager
+  enrich_contact           - fill a HubSpot contact's email/phone from Forager
+  find_and_create_contacts - discover people at a company, create + associate
+  handle_company_webhook   - company-created pipeline (enrich + find people)
+  handle_contact_webhook   - contact-created pipeline (enrich the contact)
+"""
+
+import logging
+
+import forager
+import hubspot
+
+logger = logging.getLogger(__name__)
+
+
+def _linkedin_slug(url: str) -> str | None:
+    """Extract the slug from a LinkedIn personal URL (.../in/<slug>)."""
+    if url and "linkedin.com/in/" in url:
+        return url.rstrip("/").split("/in/")[-1].split("?")[0]
+    return None
+
+
+def enrich_company(hubspot_company_id: str) -> dict:
+    """Fetch a company from HubSpot, find it in Forager, write enriched fields back."""
+    hubspot.ensure_custom_properties()
+    company = hubspot.get_company(hubspot_company_id)
+    if not company:
+        return {"error": f"Company {hubspot_company_id} not found in HubSpot"}
+
+    props = company.get("properties", {})
+    domain = (props.get("domain") or "").strip()
+    name = (props.get("name") or "").strip()
+
+    org = forager.search_organization(domain=domain or None, name=name or None)
+    if not org:
+        return {"error": f"No Forager match for domain='{domain}' name='{name}'"}
+
+    fields = forager.parse_company_fields(org)
+    hubspot.update_company(hubspot_company_id, fields)
+    return {
+        "hubspot_company_id": hubspot_company_id,
+        "forager_org_id": fields.get("forager_org_id"),
+        "name": fields.get("name"),
+        "domain": fields.get("domain"),
+        "employees": fields.get("numberofemployees"),
+        "revenue": fields.get("annualrevenue"),
+        "status": "enriched",
+    }
+
+
+def enrich_contact(hubspot_contact_id: str) -> dict:
+    """Use a contact's LinkedIn URL to look up emails/phones in Forager."""
+    hubspot.ensure_custom_properties()
+    contact = hubspot.get_contact(hubspot_contact_id)
+    if not contact:
+        return {"error": f"Contact {hubspot_contact_id} not found in HubSpot"}
+
+    props = contact.get("properties", {})
+    slug = _linkedin_slug(props.get("linkedin_url") or "")
+    if not slug:
+        return {
+            "hubspot_contact_id": hubspot_contact_id,
+            "status": "skipped",
+            "reason": "no linkedin_url on contact (required to enrich)",
+        }
+
+    emails = forager.get_person_emails(linkedin_identifier=slug)
+    phones = forager.get_person_phones(linkedin_identifier=slug)
+
+    update: dict = {}
+    if emails:
+        update["email"] = emails[0]
+        update["all_emails"] = ", ".join(emails)
+    if phones:
+        update["phone"] = phones[0]
+        update["all_phones"] = ", ".join(phones)
+    if update:
+        hubspot.update_contact(hubspot_contact_id, update)
+
+    return {
+        "hubspot_contact_id": hubspot_contact_id,
+        "linkedin_slug": slug,
+        "emails_found": emails,
+        "phones_found": phones,
+        "status": "enriched" if (emails or phones) else "no_data_found",
+    }
+
+
+def find_and_create_contacts(
+    hubspot_company_id: str,
+    company_domain: str,
+    job_title_filter: str | None = None,
+    max_contacts: int = 5,
+) -> list[dict]:
+    """Discover people at a company, enrich them, create/update + associate in HubSpot."""
+    hubspot.ensure_custom_properties()
+    roles = forager.find_contacts_at_company(company_domain, job_title_filter=job_title_filter)
+    roles = roles[:max_contacts]
+
+    results = []
+    for role in roles:
+        person = role.get("person") or {}
+        person_id = person.get("id")
+        slug = (person.get("linkedin_info") or {}).get("public_identifier")
+
+        emails = forager.get_person_emails(person_id=person_id, linkedin_identifier=slug)
+        phones = forager.get_person_phones(person_id=person_id, linkedin_identifier=slug)
+        fields = forager.parse_person_fields(role, emails, phones)
+
+        existing = hubspot.find_contact_by_email(fields["email"]) if fields.get("email") else None
+        if existing:
+            contact_id = existing["id"]
+            hubspot.update_contact(contact_id, fields)
+            action = "updated"
+        else:
+            created = hubspot.create_contact(fields)
+            contact_id = created["id"]
+            action = "created"
+
+        try:
+            hubspot.associate_contact_to_company(contact_id, hubspot_company_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Association failed for contact %s: %s", contact_id, exc)
+
+        results.append({
+            "contact_id": contact_id,
+            "name": f"{fields.get('firstname', '')} {fields.get('lastname', '')}".strip(),
+            "email": fields.get("email"),
+            "phone": fields.get("phone"),
+            "title": fields.get("jobtitle"),
+            "action": action,
+        })
+    return results
+
+
+def handle_company_webhook(hubspot_company_id: str, job_title_filter: str | None = None) -> dict:
+    """Company-created pipeline: enrich company -> enrich existing contacts -> find new ones."""
+    company_result = enrich_company(hubspot_company_id)
+    if "error" in company_result:
+        return company_result
+
+    company_domain = company_result.get("domain", "") or ""
+    existing_contacts = hubspot.get_contacts_for_company(hubspot_company_id)
+    enriched_existing = [enrich_contact(c["id"]) for c in existing_contacts]
+
+    new_contacts = []
+    if company_domain:
+        new_contacts = find_and_create_contacts(
+            hubspot_company_id=hubspot_company_id,
+            company_domain=company_domain,
+            job_title_filter=job_title_filter,
+            max_contacts=5,
+        )
+
+    return {
+        "company": company_result,
+        "enriched_existing": enriched_existing,
+        "new_contacts": new_contacts,
+    }
+
+
+def handle_contact_webhook(hubspot_contact_id: str) -> dict:
+    """Contact-created pipeline: enrich the contact."""
+    return enrich_contact(hubspot_contact_id)
