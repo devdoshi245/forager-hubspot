@@ -139,7 +139,8 @@ def find_and_create_contacts(
     return results
 
 
-def handle_company_webhook(hubspot_company_id: str, job_title_filter: str | None = None) -> dict:
+def handle_company_webhook(hubspot_company_id: str, job_title_filter: str | None = None,
+                           max_contacts: int = 5) -> dict:
     """Company-created pipeline: enrich company -> enrich existing contacts -> find new ones."""
     company_result = enrich_company(hubspot_company_id)
     if "error" in company_result:
@@ -155,7 +156,7 @@ def handle_company_webhook(hubspot_company_id: str, job_title_filter: str | None
             hubspot_company_id=hubspot_company_id,
             company_domain=company_domain,
             job_title_filter=job_title_filter,
-            max_contacts=5,
+            max_contacts=max_contacts,
         )
 
     return {

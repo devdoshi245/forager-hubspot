@@ -19,6 +19,7 @@ import os
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
+from werkzeug.exceptions import HTTPException
 
 load_dotenv()
 
@@ -39,6 +40,27 @@ try:
     hubspot.ensure_custom_properties()
 except Exception as exc:  # noqa: BLE001
     logger.warning("ensure_custom_properties() at startup failed: %s", exc)
+
+
+@app.errorhandler(Exception)
+def handle_uncaught(error):
+    """Return clean JSON instead of a 500 HTML page for unhandled errors, and
+    surface upstream issues clearly — notably Forager returning HTTP 402 when the
+    account is out of credits."""
+    if isinstance(error, HTTPException):
+        return error  # let Flask render 404/405/etc. normally
+    logger.exception("Unhandled error while handling request")
+    response = getattr(error, "response", None)
+    upstream_status = getattr(response, "status_code", None)
+    if upstream_status == 402:
+        return jsonify({
+            "error": "forager_out_of_credits",
+            "message": "Forager reports insufficient credits. Add credits in the Forager dashboard, then retry.",
+        }), 402
+    if upstream_status is not None:
+        return jsonify({"error": "upstream_error", "upstream_status": upstream_status,
+                        "message": str(error)}), 502
+    return jsonify({"error": "internal_error", "message": str(error)}), 500
 
 
 @app.route("/", methods=["GET"])
@@ -74,21 +96,27 @@ def webhook():
     payload = request.get_json(force=True, silent=True) or []
     logger.info("/webhook received %d event(s): %s", len(payload), payload)
     job_title_filter = request.args.get("job_title_filter")
+    max_contacts = int(request.args.get("max_contacts", 5))
     results = []
     for event in payload:
         object_id = str(event.get("objectId", ""))
         subscription = (event.get("subscriptionType") or "").lower()
         if not object_id:
             continue
-        if subscription.startswith("company"):
-            results.append({"type": "company", "objectId": object_id,
-                            "result": enrichment.handle_company_webhook(object_id, job_title_filter)})
-        elif subscription.startswith("contact"):
-            results.append({"type": "contact", "objectId": object_id,
-                            "result": enrichment.handle_contact_webhook(object_id)})
-        else:
-            results.append({"type": "unknown", "objectId": object_id,
-                            "subscriptionType": subscription, "skipped": True})
+        try:
+            if subscription.startswith("company"):
+                results.append({"type": "company", "objectId": object_id,
+                                "result": enrichment.handle_company_webhook(object_id, job_title_filter, max_contacts)})
+            elif subscription.startswith("contact"):
+                results.append({"type": "contact", "objectId": object_id,
+                                "result": enrichment.handle_contact_webhook(object_id)})
+            else:
+                results.append({"type": "unknown", "objectId": object_id,
+                                "subscriptionType": subscription, "skipped": True})
+        except Exception as exc:  # noqa: BLE001 - never fail the batch / trigger HubSpot retries
+            logger.exception("Webhook processing failed for %s %s", subscription, object_id)
+            results.append({"type": subscription or "unknown", "objectId": object_id, "error": str(exc)})
+    # Always 200 so HubSpot doesn't retry a permanent failure (e.g. out of credits).
     return jsonify(results), 200
 
 
@@ -162,7 +190,8 @@ def demo():
     if not company_id:
         return jsonify({"error": "company_id required"}), 400
     job_title_filter = request.args.get("job_title_filter")
-    return jsonify(enrichment.handle_company_webhook(str(company_id), job_title_filter)), 200
+    max_contacts = int(request.args.get("max_contacts", body.get("max_contacts", 5)))
+    return jsonify(enrichment.handle_company_webhook(str(company_id), job_title_filter, max_contacts)), 200
 
 
 if __name__ == "__main__":
