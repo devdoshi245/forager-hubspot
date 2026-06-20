@@ -62,6 +62,19 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
         return {"error": f"Contact {hubspot_contact_id} not found in HubSpot"}
 
     props = contact.get("properties", {})
+
+    # Idempotency guard: contacts our pipeline created/enriched carry a Forager
+    # person id. Both webhooks (company-created and contact-created) are active,
+    # so without this the contact-created webhook would re-enrich every contact
+    # the company pipeline just created (each already has a LinkedIn URL),
+    # doubling Forager credit spend. Skip anything already stamped by us.
+    if (props.get("forager_person_id") or "").strip():
+        return {
+            "hubspot_contact_id": hubspot_contact_id,
+            "status": "skipped",
+            "reason": "already enriched (forager_person_id present)",
+        }
+
     slug = _linkedin_slug(props.get("linkedin_url") or "")
     if not slug:
         return {
