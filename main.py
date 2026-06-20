@@ -68,7 +68,7 @@ def index():
     return jsonify({
         "service": "Forager x HubSpot Enrichment Automation",
         "status": "running",
-        "build": "contact-idempotency-guard",
+        "build": "email-required-contacts",
         "endpoints": [
             "GET  /health",
             "POST /webhook  (HubSpot single target URL - routes all events)",

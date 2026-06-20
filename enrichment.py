@@ -111,44 +111,99 @@ def find_and_create_contacts(
     job_title_filter: str | None = None,
     max_contacts: int = 5,
 ) -> list[dict]:
-    """Discover people at a company, enrich them, create/update + associate in HubSpot."""
+    """Discover people at a company, enrich them, create/update + associate in HubSpot.
+
+    Only people for whom Forager returns an email are created — emailless records
+    look bad in the demo and (having no email) can't be de-duplicated, so they're
+    skipped entirely. The function is idempotent: contacts the company already has
+    count toward ``max_contacts``, so a re-delivered webhook neither creates extra
+    rows nor re-spends Forager credits.
+    """
     hubspot.ensure_custom_properties()
-    roles = forager.find_contacts_at_company(company_domain, job_title_filter=job_title_filter)
-    roles = roles[:max_contacts]
 
-    results = []
-    for role in roles:
-        person = role.get("person") or {}
-        person_id = person.get("id")
-        slug = (person.get("linkedin_info") or {}).get("public_identifier")
+    # What does the company already have? Count enriched (email-bearing) contacts
+    # and remember their Forager person ids so we never re-process / re-pay for them.
+    seen_person_ids: set[str] = set()
+    already = 0
+    for existing_contact in hubspot.get_contacts_for_company(hubspot_company_id):
+        cp = existing_contact.get("properties", {})
+        pid = (cp.get("forager_person_id") or "").strip()
+        if pid:
+            seen_person_ids.add(pid)
+        if (cp.get("email") or "").strip():
+            already += 1
 
-        emails = forager.get_person_emails(person_id=person_id, linkedin_identifier=slug)
-        phones = forager.get_person_phones(person_id=person_id, linkedin_identifier=slug)
-        fields = forager.parse_person_fields(role, emails, phones)
+    needed = max_contacts - already
+    results: list[dict] = []
+    if needed <= 0:
+        return [{"status": "skipped",
+                 "reason": f"company already has {already} enriched contact(s); max is {max_contacts}"}]
 
-        existing = hubspot.find_contact_by_email(fields["email"]) if fields.get("email") else None
-        if existing:
-            contact_id = existing["id"]
-            hubspot.update_contact(contact_id, fields)
-            action = "updated"
-        else:
-            created = hubspot.create_contact(fields)
-            contact_id = created["id"]
-            action = "created"
+    # Scan candidates until we've created `needed` email-having contacts. Bound the
+    # scan (candidate_budget / MAX_PAGES) so a low email hit-rate can't run away
+    # with credits — each email lookup costs Forager credits.
+    candidate_budget = needed * 2
+    scanned = 0
+    page = 0
+    MAX_PAGES = 3
+    while needed > 0 and page < MAX_PAGES and scanned < candidate_budget:
+        roles = forager.find_contacts_at_company(
+            company_domain, job_title_filter=job_title_filter, page=page
+        )
+        page += 1
+        if not roles:
+            break
+        for role in roles:
+            if needed <= 0 or scanned >= candidate_budget:
+                break
+            person = role.get("person") or {}
+            person_id = person.get("id")
+            pid = str(person_id) if person_id else ""
+            if pid and pid in seen_person_ids:
+                continue  # already handled (this run or a previous delivery)
+            if pid:
+                seen_person_ids.add(pid)
+            scanned += 1
+            slug = (person.get("linkedin_info") or {}).get("public_identifier")
 
-        try:
-            hubspot.associate_contact_to_company(contact_id, hubspot_company_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Association failed for contact %s: %s", contact_id, exc)
+            # Email is the gate: look it up first, and if there's none, skip this
+            # person without paying for the (more expensive) phone lookup.
+            emails = forager.get_person_emails(person_id=person_id, linkedin_identifier=slug)
+            if not emails:
+                results.append({
+                    "name": f"{person.get('first_name', '')} {person.get('last_name', '')}".strip(),
+                    "action": "skipped",
+                    "reason": "no email available",
+                })
+                continue
 
-        results.append({
-            "contact_id": contact_id,
-            "name": f"{fields.get('firstname', '')} {fields.get('lastname', '')}".strip(),
-            "email": fields.get("email"),
-            "phone": fields.get("phone"),
-            "title": fields.get("jobtitle"),
-            "action": action,
-        })
+            phones = forager.get_person_phones(person_id=person_id, linkedin_identifier=slug)
+            fields = forager.parse_person_fields(role, emails, phones)
+
+            existing = hubspot.find_contact_by_email(fields["email"])
+            if existing:
+                contact_id = existing["id"]
+                hubspot.update_contact(contact_id, fields)
+                action = "updated"
+            else:
+                created = hubspot.create_contact(fields)
+                contact_id = created["id"]
+                action = "created"
+
+            try:
+                hubspot.associate_contact_to_company(contact_id, hubspot_company_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Association failed for contact %s: %s", contact_id, exc)
+
+            needed -= 1
+            results.append({
+                "contact_id": contact_id,
+                "name": f"{fields.get('firstname', '')} {fields.get('lastname', '')}".strip(),
+                "email": fields.get("email"),
+                "phone": fields.get("phone"),
+                "title": fields.get("jobtitle"),
+                "action": action,
+            })
     return results
 
 
