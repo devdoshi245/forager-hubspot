@@ -60,8 +60,21 @@ def _post(path: str, payload: dict) -> dict | list:
 # POST /datastorage/organization_search/
 # Response: {"search_results": [...], "total_search_results": int}
 # ---------------------------------------------------------------------------
+def _normalize_domain(value: str | None) -> str:
+    """Lower-case and strip scheme / path / leading 'www.' so domain comparison is
+    robust ('https://www.OpenAI.com/' -> 'openai.com')."""
+    d = (value or "").lower().strip()
+    for scheme in ("https://", "http://"):
+        if d.startswith(scheme):
+            d = d[len(scheme):]
+    d = d.split("/")[0].strip()
+    if d.startswith("www."):
+        d = d[4:]
+    return d
+
+
 def _domain_matches(org: dict, domain: str) -> bool:
-    return (org.get("domain") or "").lower().strip() == (domain or "").lower().strip()
+    return _normalize_domain(org.get("domain")) == _normalize_domain(domain)
 
 
 def _org_score(org: dict) -> tuple:
@@ -113,9 +126,22 @@ def search_organization(
             if not batch or len(candidates) >= total:
                 break
         exact = [o for o in candidates if _domain_matches(o, domain)]
-        pool = exact or candidates
-        if pool:
-            return sorted(pool, key=_org_score)[0]
+        if exact:
+            return sorted(exact, key=_org_score)[0]
+        # No org in the results actually OWNS this domain. The domain search is
+        # noisy (unrelated orgs that merely mention the domain), so picking
+        # "best of the rest" resolves to the wrong company entirely — that is how
+        # openai.com became "SoundBetter". Try an exact LinkedIn-slug match
+        # guessed from the domain root (openai.com -> "openai") before giving up.
+        root = _normalize_domain(domain).split(".")[0]
+        if root:
+            data = _post(
+                "datastorage/organization_search/",
+                {"page": 0, "linkedin_public_identifiers": [root]},
+            )
+            slug_results = (data or {}).get("search_results", [])
+            if slug_results:
+                return slug_results[0]
 
     # 3) Name — fuzzy; require an exact name match to avoid garbage.
     if name:
