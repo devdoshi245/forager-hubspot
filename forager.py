@@ -115,8 +115,26 @@ def search_organization(
         if results:
             return results[0]
 
-    # 2) Domain — paginate and rank.
+    # 2) Domain — the plain domain search is extremely noisy: a search for
+    #    openai.com returns 37 unrelated projects (Wordwise, ChatGPT, SORA AI...)
+    #    that all list openai.com as their own domain, and the real OpenAI isn't
+    #    even on the first page. So we resolve by LinkedIn handle FIRST.
     if domain:
+        # (a) The handle guessed from the domain root (openai.com -> "openai")
+        #     returns the one canonical company. Validate it owns the domain,
+        #     then trust it over the noisy domain results.
+        root = _normalize_domain(domain).split(".")[0]
+        if root:
+            slug_data = _post(
+                "datastorage/organization_search/",
+                {"page": 0, "linkedin_public_identifiers": [root]},
+            )
+            for org in (slug_data or {}).get("search_results", []):
+                if _domain_matches(org, domain):
+                    return org
+        # (b) Fall back to the domain search, keeping ONLY orgs that actually own
+        #     the domain and preferring the most canonical (a real domain_rank
+        #     beats None, then larger headcount). Never pick from the noise.
         candidates: list[dict] = []
         for page in range(max_pages):
             data = _post("datastorage/organization_search/", {"page": page, "domains": [domain]})
@@ -128,20 +146,6 @@ def search_organization(
         exact = [o for o in candidates if _domain_matches(o, domain)]
         if exact:
             return sorted(exact, key=_org_score)[0]
-        # No org in the results actually OWNS this domain. The domain search is
-        # noisy (unrelated orgs that merely mention the domain), so picking
-        # "best of the rest" resolves to the wrong company entirely — that is how
-        # openai.com became "SoundBetter". Try an exact LinkedIn-slug match
-        # guessed from the domain root (openai.com -> "openai") before giving up.
-        root = _normalize_domain(domain).split(".")[0]
-        if root:
-            data = _post(
-                "datastorage/organization_search/",
-                {"page": 0, "linkedin_public_identifiers": [root]},
-            )
-            slug_results = (data or {}).get("search_results", [])
-            if slug_results:
-                return slug_results[0]
 
     # 3) Name — fuzzy; require an exact name match to avoid garbage.
     if name:
