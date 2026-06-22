@@ -96,13 +96,11 @@ def health():
 
 @app.route("/debug/alert-test", methods=["GET", "POST"])
 def alert_test():
-    """Fire a harmless test alert so you can confirm email config without a real failure."""
-    sent = alerts.send_error_alert(
-        "Test alert",
-        error=RuntimeError("This is a test alert — your error-email setup is working."),
-        context={"trigger": "manual /debug/alert-test"},
-    )
-    return jsonify({"alerts_configured": alerts.is_configured(), "email_sent": sent}), 200
+    """Fire a harmless test alert so you can confirm email config without a real failure.
+
+    Returns the ACTUAL SMTP error (and the non-secret config) when the send fails,
+    so a 'email_sent: false' is self-diagnosing instead of silent."""
+    return jsonify(alerts.test_send()), 200
 
 
 @app.route("/webhook", methods=["POST"])

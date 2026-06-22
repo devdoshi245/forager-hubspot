@@ -64,6 +64,30 @@ def _build_body(summary: str, error, context: dict | None) -> str:
     return "\n".join(lines)
 
 
+def _build_message(summary: str, error=None, context: dict | None = None) -> EmailMessage:
+    msg = EmailMessage()
+    msg["Subject"] = f"[Forager x HubSpot] {summary}"
+    msg["From"] = _ALERT_FROM
+    msg["To"] = ", ".join(_ALERT_TO)
+    msg.set_content(_build_body(summary, error, context))
+    return msg
+
+
+def _transmit(msg: EmailMessage) -> None:
+    """Open the SMTP connection and send the message. Raises on any failure."""
+    if _SMTP_PORT == 465:
+        with smtplib.SMTP_SSL(_SMTP_HOST, _SMTP_PORT, timeout=20,
+                              context=ssl.create_default_context()) as server:
+            server.login(_SMTP_USER, _SMTP_PASSWORD)
+            server.send_message(msg)
+    else:
+        with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=20) as server:
+            if _USE_TLS:
+                server.starttls(context=ssl.create_default_context())
+            server.login(_SMTP_USER, _SMTP_PASSWORD)
+            server.send_message(msg)
+
+
 def send_error_alert(summary: str, error=None, context: dict | None = None) -> bool:
     """Email an error alert. Returns True if sent, False if skipped/failed. Never raises."""
     if not is_configured():
@@ -77,28 +101,54 @@ def send_error_alert(summary: str, error=None, context: dict | None = None) -> b
     if last is not None and (now - last) < _THROTTLE_SECONDS:
         logger.info("Suppressing duplicate alert (throttled): %s", summary)
         return False
-    _recent_sent[key] = now
-
-    msg = EmailMessage()
-    msg["Subject"] = f"[Forager x HubSpot] {summary}"
-    msg["From"] = _ALERT_FROM
-    msg["To"] = ", ".join(_ALERT_TO)
-    msg.set_content(_build_body(summary, error, context))
 
     try:
-        if _SMTP_PORT == 465:
-            with smtplib.SMTP_SSL(_SMTP_HOST, _SMTP_PORT, timeout=20,
-                                  context=ssl.create_default_context()) as server:
-                server.login(_SMTP_USER, _SMTP_PASSWORD)
-                server.send_message(msg)
-        else:
-            with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=20) as server:
-                if _USE_TLS:
-                    server.starttls(context=ssl.create_default_context())
-                server.login(_SMTP_USER, _SMTP_PASSWORD)
-                server.send_message(msg)
+        _transmit(_build_message(summary, error, context))
+        # Record only after a successful send, so a failed send doesn't throttle (block) retries.
+        _recent_sent[key] = now
         logger.info("Sent error alert email to %s: %s", _ALERT_TO, summary)
         return True
     except Exception as exc:  # noqa: BLE001 - the alerter must never break the request
         logger.warning("Failed to send alert email (%s): %s", summary, exc)
         return False
+
+
+def config_summary() -> dict:
+    """Non-secret view of the current alert config, for debugging (no password)."""
+    return {
+        "configured": is_configured(),
+        "smtp_host": _SMTP_HOST,
+        "smtp_port": _SMTP_PORT,
+        "smtp_user": _SMTP_USER,
+        "smtp_password_set": bool(_SMTP_PASSWORD),
+        "use_tls": _USE_TLS,
+        "from": _ALERT_FROM,
+        "to": _ALERT_TO,
+    }
+
+
+def test_send() -> dict:
+    """Attempt a real test send and surface the ACTUAL error (for /debug/alert-test).
+
+    Unlike send_error_alert(), this bypasses the throttle (so repeated calls always
+    attempt) and returns the real SMTP error string instead of swallowing it.
+    """
+    result = {"alerts_configured": is_configured(), "email_sent": False,
+              "error": None, "config": config_summary()}
+    if not is_configured():
+        result["error"] = ("Not configured. Need SMTP_HOST, SMTP_USER, SMTP_PASSWORD, "
+                            "ALERT_EMAIL_TO (and ALERT_EMAIL_FROM or SMTP_USER).")
+        return result
+    msg = _build_message(
+        "Test alert",
+        RuntimeError("This is a test alert — your error-email setup is working."),
+        {"trigger": "manual /debug/alert-test"},
+    )
+    try:
+        _transmit(msg)
+        result["email_sent"] = True
+        logger.info("Sent test alert email to %s", _ALERT_TO)
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        logger.warning("Test alert send failed: %s", result["error"])
+    return result
