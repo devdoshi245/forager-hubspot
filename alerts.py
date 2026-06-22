@@ -36,7 +36,9 @@ _SMTP_USER = os.environ.get("SMTP_USER")
 _SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 _USE_TLS = os.environ.get("SMTP_USE_TLS", "true").strip().lower() != "false"
 _ALERT_FROM = os.environ.get("ALERT_EMAIL_FROM") or _SMTP_USER
-_ALERT_TO = [e.strip() for e in os.environ.get("ALERT_EMAIL_TO", "").split(",") if e.strip()]
+# Default recipient; override anytime with the ALERT_EMAIL_TO env var (comma-separated).
+_DEFAULT_ALERT_TO = "doshidev58@gmail.com"
+_ALERT_TO = [e.strip() for e in os.environ.get("ALERT_EMAIL_TO", _DEFAULT_ALERT_TO).split(",") if e.strip()]
 
 # Don't flood: suppress identical alerts within this window (per process).
 _THROTTLE_SECONDS = int(os.environ.get("ALERT_THROTTLE_SECONDS", "300"))
