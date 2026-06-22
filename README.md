@@ -40,21 +40,29 @@ Forager contact lookup. Matching is normalization-tolerant (abbreviations, comma
 variants, seniority prefixes). The optional `job_title_filter` still works as an
 extra narrowing on top of the committee list. `max_contacts` defaults to **5**.
 
-## Scoring (Claude)
+## Scoring (LLM — Gemini or Claude)
 
-Two company-level scores are computed via the Claude API and written to HubSpot
-custom properties:
+Two company-level scores are computed via an LLM and written to HubSpot custom
+properties:
 
 - **ICP fit** → `icp_match_score`, `icp_decision` (ICP/MAYBE/REMOVE),
   `icp_confidence`, `icp_reasoning`, `icp_positives`, `icp_negatives`,
   `icp_red_flags`, `icp_best_fit_use_case`, `icp_suggested_next_step`.
-- **Logo recognizability** (uses Claude web search) → `logo_score`, `logo_tier`
+- **Logo recognizability** (uses web search) → `logo_score`, `logo_tier`
   (T1/T2/T3), `logo_confidence`, `logo_why`, `logo_forager_fit`,
   `logo_forager_fit_reason`, `logo_evidence`.
 
-Scoring is gated on `ANTHROPIC_API_KEY` — if it's unset, enrichment still runs and
-the scores are simply skipped. Web search is billed to the Anthropic account
-(not Forager credits).
+The provider is **pluggable** (`scoring.py`) so you can test on a free key now and
+switch for the client with no code change:
+
+- **Gemini** (`GEMINI_API_KEY`, free tier) — the logo step uses Google Search
+  grounding. Recommended for testing.
+- **Claude** (`ANTHROPIC_API_KEY`) — the logo step uses Claude's web search.
+
+Selection is automatic from whichever key is present (Gemini wins if both are
+set); force it with `SCORING_PROVIDER=gemini|anthropic`. If no key is configured,
+enrichment still runs and the scores are simply skipped. LLM + web-search usage is
+billed to the LLM account, **not** Forager credits.
 
 ## Endpoints
 
@@ -91,8 +99,13 @@ python main.py                # http://localhost:5000
 FORAGER_API_KEY       Forager API key
 FORAGER_ACCOUNT_ID    Forager account id (integer, part of every API path)
 HUBSPOT_TOKEN         HubSpot Private App token
-ANTHROPIC_API_KEY     Claude API key — enables ICP + logo scoring (optional)
-ANTHROPIC_MODEL       optional; scoring model (defaults to claude-opus-4-8)
+
+# Scoring LLM (optional — without a key, scoring is skipped):
+GEMINI_API_KEY        Google AI Studio key — enables scoring on Gemini (free tier)
+GEMINI_MODEL          optional; defaults to gemini-2.5-flash
+ANTHROPIC_API_KEY     Claude API key — enables scoring on Claude
+ANTHROPIC_MODEL       optional; defaults to claude-opus-4-8
+SCORING_PROVIDER      optional; force "gemini" or "anthropic" (else auto-detected)
 ```
 
 The HubSpot Private App needs these scopes:
@@ -119,8 +132,8 @@ docs:
 
 The `Procfile` runs `gunicorn main:app`. Set the environment variables in
 the Railway dashboard (the three Forager/HubSpot ones are required; add
-`ANTHROPIC_API_KEY` to turn on scoring), deploy, then point your HubSpot Private
-App's single
+`GEMINI_API_KEY` — or `ANTHROPIC_API_KEY` — to turn on scoring), deploy, then
+point your HubSpot Private App's single
 webhook **Target URL** at `https://<your-app>.up.railway.app/webhook` — it routes
 company and contact events automatically (HubSpot only allows one Target URL
 per app).

@@ -1,24 +1,29 @@
 """
 scoring.py
 ----------
-Claude-powered company scoring used in the company pipeline (diagram: "ICP fit
-scoring" + "Logo recognizability", parallel to Forager enrichment):
+Company scoring used in the company pipeline (diagram: "ICP fit scoring" + "Logo
+recognizability", parallel to Forager enrichment):
 
   1. ICP fit scoring      - is this company a good fit for Forager.ai? (text only)
   2. Logo recognizability - how known is the brand in its B2B category? (web search)
 
-Both call the Claude API (Anthropic). The exact scoring prompts are product-owned
-and live verbatim in _ICP_SYSTEM / _LOGO_SYSTEM below. Each returns strict JSON,
-which we flatten into HubSpot company properties.
+Pluggable LLM provider so you can test on a free key now and switch to Claude for
+the client later with NO code change:
 
-Configuration (env):
-  ANTHROPIC_API_KEY   required to enable scoring. If unset (or the `anthropic`
-                      package is missing) scoring is skipped gracefully and
-                      company enrichment still runs.
-  ANTHROPIC_MODEL     optional; defaults to claude-opus-4-8.
+  SCORING_PROVIDER   "gemini" | "anthropic". If unset, auto-detects from whichever
+                     key is present (Gemini wins if both are set).
 
-Web search incurs Anthropic web-search usage (billed to the Anthropic account),
-not Forager credits.
+  Gemini (free tier — recommended for testing; logo uses Google Search grounding):
+    GEMINI_API_KEY   (or GOOGLE_API_KEY)   key from aistudio.google.com
+    GEMINI_MODEL     optional; defaults to gemini-2.5-flash
+
+  Anthropic / Claude (for the client):
+    ANTHROPIC_API_KEY
+    ANTHROPIC_MODEL  optional; defaults to claude-opus-4-8
+
+If no provider is configured (no key), scoring is skipped gracefully and company
+enrichment still runs. Web search / LLM usage is billed to the LLM account, NOT
+Forager credits.
 """
 
 import json
@@ -28,8 +33,10 @@ import re
 
 logger = logging.getLogger(__name__)
 
-_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
-# Server-side web search tool (Claude runs the searches; results never touch our code).
+_PROVIDER = os.environ.get("SCORING_PROVIDER", "").strip().lower()
+_ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
+_GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+# Anthropic server-side web search tool (Claude runs the searches itself).
 _WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 5}
 
 # ---------------------------------------------------------------------------
@@ -124,29 +131,24 @@ Input:
 company_name:"""
 
 
-def _client():
-    """Return an Anthropic client, or None if scoring is not configured."""
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return None
-    try:
-        import anthropic
-    except ImportError:
-        logger.warning("`anthropic` package not installed; company scoring disabled")
-        return None
-    return anthropic.Anthropic()
+# ---------------------------------------------------------------------------
+# Provider resolution
+# ---------------------------------------------------------------------------
+def _resolve_provider() -> str | None:
+    if _PROVIDER in ("gemini", "anthropic"):
+        return _PROVIDER
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        return "gemini"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    return None
 
 
-def _response_text(response) -> str:
-    """Concatenate the text content blocks of a Messages API response."""
-    parts = []
-    for block in getattr(response, "content", []) or []:
-        if getattr(block, "type", None) == "text":
-            parts.append(block.text)
-    return "".join(parts)
-
-
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 def _extract_json(text: str | None) -> dict | None:
-    """Parse the model's JSON output, tolerating stray code fences / surrounding prose."""
+    """Parse the model's JSON, tolerating stray code fences / surrounding prose."""
     if not text:
         return None
     cleaned = text.strip()
@@ -167,7 +169,6 @@ def _extract_json(text: str | None) -> dict | None:
 
 
 def _employee_range(count) -> str:
-    """Map a headcount to a coarse band for the ICP prompt's employee_range field."""
     try:
         n = int(count)
     except (TypeError, ValueError):
@@ -182,9 +183,9 @@ def _employee_range(count) -> str:
     return "10000+"
 
 
-def _score_icp(client, fields: dict) -> dict | None:
+def _icp_user(fields: dict) -> str:
     count = fields.get("numberofemployees")
-    user = "\n".join([
+    return "\n".join([
         f"product_name: {fields.get('name', '') or ''}",
         "g2_description: ",  # no G2 integration; forager_description carries the weight
         f"forager_description: {fields.get('description', '') or ''}",
@@ -193,29 +194,13 @@ def _score_icp(client, fields: dict) -> dict | None:
         f"employee_range: {_employee_range(count)}",
         f"employee_count: {count if count is not None else ''}",
     ])
-    response = client.messages.create(
-        model=_MODEL, max_tokens=1024, system=_ICP_SYSTEM,
-        messages=[{"role": "user", "content": user}],
-    )
-    return _extract_json(_response_text(response))
 
 
-def _score_logo(client, name: str, domain: str = "") -> dict | None:
+def _logo_user(name: str, domain: str = "") -> str:
     user = f"company_name: {name}"
     if domain:
         user += f"\ndomain: {domain}"  # helps disambiguate + detect parked domains
-    messages = [{"role": "user", "content": user}]
-    response = None
-    # Server runs web search; if it pauses after the 10-iteration tool loop, resume.
-    for _ in range(6):
-        response = client.messages.create(
-            model=_MODEL, max_tokens=2048, system=_LOGO_SYSTEM,
-            messages=messages, tools=[_WEB_SEARCH_TOOL],
-        )
-        if getattr(response, "stop_reason", None) != "pause_turn":
-            break
-        messages.append({"role": "assistant", "content": response.content})
-    return _extract_json(_response_text(response))
+    return user
 
 
 def _icp_to_hubspot(data: dict) -> dict:
@@ -249,40 +234,132 @@ def _logo_to_hubspot(data: dict) -> dict:
     }
 
 
-def score_company(name: str, fields: dict) -> dict:
-    """Run ICP + logo scoring for a company.
+# ---------------------------------------------------------------------------
+# Anthropic / Claude backend
+# ---------------------------------------------------------------------------
+def _anthropic_client():
+    import anthropic  # imported lazily so the package is optional
+    return anthropic.Anthropic()
 
-    Returns {"icp": <raw|error>, "logo": <raw|error>, "hubspot_fields": {...}}.
-    Never raises: a failure in either score is logged and reported, and company
-    enrichment continues. If scoring isn't configured, returns a "skipped" status.
+
+def _anthropic_text(response) -> str:
+    parts = []
+    for block in getattr(response, "content", []) or []:
+        if getattr(block, "type", None) == "text":
+            parts.append(block.text)
+    return "".join(parts)
+
+
+def _icp_anthropic(client, fields: dict) -> dict | None:
+    response = client.messages.create(
+        model=_ANTHROPIC_MODEL, max_tokens=1024, system=_ICP_SYSTEM,
+        messages=[{"role": "user", "content": _icp_user(fields)}],
+    )
+    return _extract_json(_anthropic_text(response))
+
+
+def _logo_anthropic(client, name: str, domain: str = "") -> dict | None:
+    messages = [{"role": "user", "content": _logo_user(name, domain)}]
+    response = None
+    for _ in range(6):  # resume if the server-side search loop pauses
+        response = client.messages.create(
+            model=_ANTHROPIC_MODEL, max_tokens=2048, system=_LOGO_SYSTEM,
+            messages=messages, tools=[_WEB_SEARCH_TOOL],
+        )
+        if getattr(response, "stop_reason", None) != "pause_turn":
+            break
+        messages.append({"role": "assistant", "content": response.content})
+    return _extract_json(_anthropic_text(response))
+
+
+# ---------------------------------------------------------------------------
+# Google Gemini backend (free tier; logo uses Google Search grounding)
+# ---------------------------------------------------------------------------
+def _gemini_client():
+    from google import genai  # imported lazily so the package is optional
+    # Client() reads GEMINI_API_KEY / GOOGLE_API_KEY from the environment.
+    return genai.Client()
+
+
+def _icp_gemini(client, fields: dict) -> dict | None:
+    from google.genai import types
+    response = client.models.generate_content(
+        model=_GEMINI_MODEL,
+        contents=_icp_user(fields),
+        config=types.GenerateContentConfig(
+            system_instruction=_ICP_SYSTEM,
+            response_mime_type="application/json",  # safe: no tools on this call
+        ),
+    )
+    return _extract_json(getattr(response, "text", None))
+
+
+def _logo_gemini(client, name: str, domain: str = "") -> dict | None:
+    from google.genai import types
+    # Google Search grounding can't be combined with response_mime_type=json,
+    # so we parse the JSON out of the text (the prompt enforces JSON-only).
+    response = client.models.generate_content(
+        model=_GEMINI_MODEL,
+        contents=_logo_user(name, domain),
+        config=types.GenerateContentConfig(
+            system_instruction=_LOGO_SYSTEM,
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+        ),
+    )
+    return _extract_json(getattr(response, "text", None))
+
+
+_BACKENDS = {
+    "anthropic": (_anthropic_client, _icp_anthropic, _logo_anthropic),
+    "gemini": (_gemini_client, _icp_gemini, _logo_gemini),
+}
+
+
+def score_company(name: str, fields: dict) -> dict:
+    """Run ICP + logo scoring for a company with the configured LLM provider.
+
+    Returns {"icp": <raw|error>, "logo": <raw|error>, "hubspot_fields": {...},
+    "status": "scored"|"skipped", "provider": ...}. Never raises: a failure in
+    either score is logged and reported, and company enrichment continues.
     """
     out: dict = {"icp": None, "logo": None, "hubspot_fields": {}}
-    client = _client()
-    if client is None:
+
+    provider = _resolve_provider()
+    if not provider:
         out["status"] = "skipped"
-        out["reason"] = "ANTHROPIC_API_KEY not set (or `anthropic` missing); scoring disabled"
+        out["reason"] = "no scoring provider configured (set GEMINI_API_KEY or ANTHROPIC_API_KEY)"
+        return out
+
+    try:
+        make_client, icp_fn, logo_fn = _BACKENDS[provider]
+        client = make_client()
+    except Exception as exc:  # noqa: BLE001 - missing package / bad key shouldn't break enrichment
+        logger.warning("Scoring disabled — %s client unavailable: %s", provider, exc)
+        out["status"] = "skipped"
+        out["reason"] = f"{provider} client unavailable: {exc}"
         return out
 
     fields = fields or {}
     domain = fields.get("domain", "") or ""
 
     try:
-        icp_raw = _score_icp(client, fields)
+        icp_raw = icp_fn(client, fields)
         out["icp"] = icp_raw
         if icp_raw:
             out["hubspot_fields"].update(_icp_to_hubspot(icp_raw))
-    except Exception as exc:  # noqa: BLE001 - never let scoring break enrichment
-        logger.warning("ICP scoring failed for '%s': %s", name, exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ICP scoring failed (%s) for '%s': %s", provider, name, exc)
         out["icp"] = {"error": str(exc)}
 
     try:
-        logo_raw = _score_logo(client, name, domain)
+        logo_raw = logo_fn(client, name, domain)
         out["logo"] = logo_raw
         if logo_raw:
             out["hubspot_fields"].update(_logo_to_hubspot(logo_raw))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Logo scoring failed for '%s': %s", name, exc)
+        logger.warning("Logo scoring failed (%s) for '%s': %s", provider, name, exc)
         out["logo"] = {"error": str(exc)}
 
     out["status"] = "scored"
+    out["provider"] = provider
     return out
