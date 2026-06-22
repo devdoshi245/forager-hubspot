@@ -25,10 +25,29 @@ logger = logging.getLogger(__name__)
 HUBSPOT_BASE = "https://api.hubapi.com"
 HUBSPOT_TOKEN = os.environ.get("HUBSPOT_TOKEN")
 
-# Custom text properties we create on first use (name, human label).
+# Custom properties we create on first use: (name, human label[, type]).
+# type is "string" (free text, default) or "number".
 _COMPANY_CUSTOM_PROPS = [
     ("founded_year", "Founded Year"),
     ("forager_org_id", "Forager Org ID"),
+    # ICP fit scoring (Claude) — see scoring.py
+    ("icp_match_score", "ICP Match Score", "number"),
+    ("icp_decision", "ICP Decision"),                       # ICP | MAYBE | REMOVE
+    ("icp_confidence", "ICP Confidence", "number"),
+    ("icp_reasoning", "ICP Reasoning"),
+    ("icp_positives", "ICP Positives"),
+    ("icp_negatives", "ICP Negatives"),
+    ("icp_red_flags", "ICP Red Flags"),
+    ("icp_best_fit_use_case", "ICP Best-Fit Use Case"),
+    ("icp_suggested_next_step", "ICP Suggested Next Step"),
+    # Logo recognizability (Claude + web search) — see scoring.py
+    ("logo_score", "Logo Recognizability Score", "number"),
+    ("logo_tier", "Logo Tier"),                             # T1 | T2 | T3
+    ("logo_confidence", "Logo Confidence", "number"),
+    ("logo_why", "Logo Why"),
+    ("logo_forager_fit", "Logo Forager Fit"),               # HIGH | MEDIUM | LOW
+    ("logo_forager_fit_reason", "Logo Forager Fit Reason"),
+    ("logo_evidence", "Logo Evidence"),
 ]
 _CONTACT_CUSTOM_PROPS = [
     ("linkedin_url", "LinkedIn Profile URL"),
@@ -128,13 +147,16 @@ def ensure_custom_properties() -> None:
     _ensured = True
 
 
-def _create_properties(object_type: str, group: str, props: list[tuple[str, str]]) -> None:
-    for name, label in props:
+def _create_properties(object_type: str, group: str, props: list[tuple]) -> None:
+    for entry in props:
+        name, label = entry[0], entry[1]
+        prop_type = entry[2] if len(entry) > 2 else "string"
+        field_type = "number" if prop_type == "number" else "text"
         body = {
             "name": name,
             "label": label,
-            "type": "string",
-            "fieldType": "text",
+            "type": prop_type,
+            "fieldType": field_type,
             "groupName": group,
         }
         try:

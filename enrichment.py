@@ -13,8 +13,10 @@ Five capabilities:
 
 import logging
 
+import buyer_committee
 import forager
 import hubspot
+import scoring
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,13 @@ def enrich_company(hubspot_company_id: str) -> dict:
         return {"error": f"No Forager match for domain='{domain}' name='{name}'"}
 
     fields = forager.parse_company_fields(org)
-    hubspot.update_company(hubspot_company_id, fields)
+
+    # Score the company in parallel to enrichment (diagram: ICP fit + logo
+    # recognizability via Claude). Skips gracefully if scoring isn't configured,
+    # and never blocks the Forager write-back on a scoring failure.
+    scores = scoring.score_company(fields.get("name") or name, fields)
+
+    hubspot.update_company(hubspot_company_id, {**fields, **scores.get("hubspot_fields", {})})
     return {
         "hubspot_company_id": hubspot_company_id,
         "forager_org_id": fields.get("forager_org_id"),
@@ -50,6 +58,9 @@ def enrich_company(hubspot_company_id: str) -> dict:
         "domain": fields.get("domain"),
         "employees": fields.get("numberofemployees"),
         "revenue": fields.get("annualrevenue"),
+        "icp": scores.get("icp"),
+        "logo": scores.get("logo"),
+        "scoring_status": scores.get("status"),
         "status": "enriched",
     }
 
@@ -113,11 +124,16 @@ def find_and_create_contacts(
 ) -> list[dict]:
     """Discover people at a company, enrich them, create/update + associate in HubSpot.
 
-    Only people for whom Forager returns an email are created — emailless records
-    look bad in the demo and (having no email) can't be de-duplicated, so they're
-    skipped entirely. The function is idempotent: contacts the company already has
-    count toward ``max_contacts``, so a re-delivered webhook neither creates extra
-    rows nor re-spends Forager credits.
+    Only people whose job title is on the TAM buyer-committee list
+    (``buyer_committee.matches_buyer_committee``) are created — everyone else is
+    skipped *before* any (credit-spending) Forager contact lookup. ``job_title_filter``,
+    if given, is an additional narrowing applied on top of the committee list.
+
+    Of the buyer-committee matches, only people for whom Forager returns an email
+    are created — emailless records can't be de-duplicated, so they're skipped.
+    The function is idempotent: contacts the company already has count toward
+    ``max_contacts``, so a re-delivered webhook neither creates extra rows nor
+    re-spends Forager credits.
     """
     hubspot.ensure_custom_properties()
 
@@ -147,8 +163,10 @@ def find_and_create_contacts(
     page = 0
     MAX_PAGES = 3
     while needed > 0 and page < MAX_PAGES and scanned < candidate_budget:
+        # Fetch the broad set of current people (no Forager-side title filter) so
+        # we can apply the full buyer-committee list locally.
         roles = forager.find_contacts_at_company(
-            company_domain, job_title_filter=job_title_filter, page=page
+            company_domain, job_title_filter=None, page=page
         )
         page += 1
         if not roles:
@@ -156,6 +174,12 @@ def find_and_create_contacts(
         for role in roles:
             if needed <= 0 or scanned >= candidate_budget:
                 break
+            role_title = role.get("role_title") or ""
+            # Title gate (free, local): only buyer-committee titles are created.
+            if not buyer_committee.matches_buyer_committee(role_title):
+                continue
+            if job_title_filter and job_title_filter.lower() not in role_title.lower():
+                continue
             person = role.get("person") or {}
             person_id = person.get("id")
             pid = str(person_id) if person_id else ""
