@@ -20,6 +20,7 @@ IMPORTANT NOTES (discovered by probing the live API, the docs were inaccurate):
 
 import logging
 import os
+import re
 
 import requests
 
@@ -162,6 +163,21 @@ def get_organization_by_linkedin(linkedin_identifier: str) -> dict | None:
     return search_organization(linkedin_identifier=linkedin_identifier)
 
 
+# LinkedIn stores a merged/duplicate company page as
+# ".../company/duplicate__<id>_<slug>" — a dead shell left over when it merges
+# duplicate listings (e.g. apify.com's record carries
+# ".../company/duplicate__10608457_apify/" instead of ".../company/apify/").
+# Forager passes that stale URL straight through, so rewrite it to the canonical
+# ".../company/<slug>" before it reaches HubSpot.
+_DUP_LINKEDIN_RE = re.compile(r"(/company/)duplicate__\d+_([^/?#]+)", re.IGNORECASE)
+
+
+def _clean_linkedin_url(url: str) -> str:
+    if not url:
+        return url
+    return _DUP_LINKEDIN_RE.sub(r"\1\2", url)
+
+
 def parse_company_fields(org: dict) -> dict:
     """Flatten a Forager org record into HubSpot company properties."""
     if not org:
@@ -176,7 +192,7 @@ def parse_company_fields(org: dict) -> dict:
         "name": org.get("name", "") or "",
         "domain": org.get("domain", "") or "",
         "description": org.get("description", "") or "",
-        "linkedin_company_page": li.get("public_profile_url", "") or "",
+        "linkedin_company_page": _clean_linkedin_url(li.get("public_profile_url", "") or ""),
         "numberofemployees": org.get("employees_amount"),
         "annualrevenue": finance.get("revenue"),
         "founded_year": founded[:4] if founded else "",
@@ -293,10 +309,10 @@ def parse_person_fields(role: dict, emails: list, phones: list) -> dict:
         "city": location["city"],
         "state": location["state"],
         "country": location["country"],
-        "linkedin_url": person_li.get("public_profile_url", "") or "",
+        "linkedin_url": _clean_linkedin_url(person_li.get("public_profile_url", "") or ""),
         "company": org.get("name", "") or "",
         "company_domain": org.get("domain", "") or "",
-        "company_linkedin_url": org_li.get("public_profile_url", "") or "",
+        "company_linkedin_url": _clean_linkedin_url(org_li.get("public_profile_url", "") or ""),
         # Nice-to-haves (stored in custom properties)
         "person_description": person.get("description", "") or "",
         "person_headline": person.get("headline", "") or "",
