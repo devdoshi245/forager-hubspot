@@ -26,9 +26,10 @@ It can:
 | `forager.py` | All Forager API calls + response → field mapping |
 | `hubspot.py` | All HubSpot CRM calls (+ custom-property bootstrap, resilient writes) |
 | `buyer_committee.py` | TAM buyer-committee title list + the title matcher |
-| `scoring.py` | Claude-powered ICP fit + logo recognizability scoring |
-| `enrichment.py` | Business logic tying Forager, Claude, and HubSpot together |
-| `main.py` | Flask server (webhooks + manual triggers) |
+| `scoring.py` | LLM-powered ICP fit + logo recognizability scoring (Gemini/Claude) |
+| `alerts.py` | Email error alerts over SMTP (off until configured) |
+| `enrichment.py` | Business logic tying Forager, the LLM, and HubSpot together |
+| `main.py` | Flask server (webhooks + manual triggers + error alerts) |
 
 ## Buyer-committee title filtering
 
@@ -63,6 +64,20 @@ Selection is automatic from whichever key is present (Gemini wins if both are
 set); force it with `SCORING_PROVIDER=gemini|anthropic`. If no key is configured,
 enrichment still runs and the scores are simply skipped. LLM + web-search usage is
 billed to the LLM account, **not** Forager credits.
+
+## Error alerts (email)
+
+When the pipeline hits a real failure — an unhandled error, a HubSpot/Forager API
+error, or Forager out-of-credits — `alerts.py` emails the reason + traceback so the
+team finds out without watching logs. It sends over **SMTP** (works with Gmail,
+Brevo, SendGrid, Mailgun, …) and stays **OFF until configured**: set `SMTP_HOST`,
+`SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `ALERT_EMAIL_FROM`, and `ALERT_EMAIL_TO`
+(comma-separated). The alerter never raises, and identical alerts are throttled
+(`ALERT_THROTTLE_SECONDS`, default 300s) so one bad batch can't flood your inbox.
+
+Verify your setup with **`GET/POST /debug/alert-test`** — it sends a harmless test
+email and returns `{"alerts_configured": ..., "email_sent": ...}`. Soft outcomes
+(e.g. "no Forager match") are returned in the response, not emailed.
 
 ## Endpoints
 
@@ -106,6 +121,14 @@ GEMINI_MODEL          optional; defaults to gemini-2.5-flash
 ANTHROPIC_API_KEY     Claude API key — enables scoring on Claude
 ANTHROPIC_MODEL       optional; defaults to claude-opus-4-8
 SCORING_PROVIDER      optional; force "gemini" or "anthropic" (else auto-detected)
+
+# Error email alerts (optional — without these, alerts are skipped):
+SMTP_HOST             SMTP server, e.g. smtp.gmail.com
+SMTP_PORT             587 (STARTTLS) or 465 (SSL); default 587
+SMTP_USER             SMTP username
+SMTP_PASSWORD         SMTP password / app password
+ALERT_EMAIL_FROM      from address (defaults to SMTP_USER)
+ALERT_EMAIL_TO        comma-separated recipients
 ```
 
 The HubSpot Private App needs these scopes:

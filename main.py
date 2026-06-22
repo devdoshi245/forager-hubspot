@@ -23,7 +23,8 @@ from werkzeug.exceptions import HTTPException
 
 load_dotenv()
 
-import enrichment  # noqa: E402  (must import after load_dotenv so env vars are set)
+import alerts      # noqa: E402  (must import after load_dotenv so env vars are set)
+import enrichment  # noqa: E402
 import hubspot     # noqa: E402
 
 logging.basicConfig(
@@ -52,6 +53,11 @@ def handle_uncaught(error):
     logger.exception("Unhandled error while handling request")
     response = getattr(error, "response", None)
     upstream_status = getattr(response, "status_code", None)
+    summary = ("Forager out of credits" if upstream_status == 402
+               else f"Unhandled error on {request.method} {request.path}")
+    alerts.send_error_alert(summary, error=error,
+                            context={"method": request.method, "path": request.path,
+                                     "upstream_status": upstream_status})
     if upstream_status == 402:
         return jsonify({
             "error": "forager_out_of_credits",
@@ -68,7 +74,7 @@ def index():
     return jsonify({
         "service": "Forager x HubSpot Enrichment Automation",
         "status": "running",
-        "build": "v2-buyer-committee-filter+icp+logo-scoring",
+        "build": "v2-buyer-committee-filter+icp+logo-scoring+email-alerts",
         "endpoints": [
             "GET  /health",
             "POST /webhook  (HubSpot single target URL - routes all events)",
@@ -78,6 +84,7 @@ def index():
             "POST /enrich/contact",
             "POST /enrich/find-contacts",
             "POST /enrich/demo",
+            "GET/POST /debug/alert-test  (send a test error email)",
         ],
     }), 200
 
@@ -85,6 +92,17 @@ def index():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"}), 200
+
+
+@app.route("/debug/alert-test", methods=["GET", "POST"])
+def alert_test():
+    """Fire a harmless test alert so you can confirm email config without a real failure."""
+    sent = alerts.send_error_alert(
+        "Test alert",
+        error=RuntimeError("This is a test alert — your error-email setup is working."),
+        context={"trigger": "manual /debug/alert-test"},
+    )
+    return jsonify({"alerts_configured": alerts.is_configured(), "email_sent": sent}), 200
 
 
 @app.route("/webhook", methods=["POST"])
@@ -117,6 +135,11 @@ def webhook():
         except Exception as exc:  # noqa: BLE001 - never fail the batch / trigger HubSpot retries
             logger.exception("Webhook processing failed for %s %s", subscription, object_id)
             results.append({"type": subscription or "unknown", "objectId": object_id, "error": str(exc)})
+            alerts.send_error_alert(
+                f"Webhook processing failed: {subscription or 'unknown'} {object_id}",
+                error=exc,
+                context={"endpoint": "/webhook", "subscriptionType": subscription, "objectId": object_id},
+            )
     # Always 200 so HubSpot doesn't retry a permanent failure (e.g. out of credits).
     return jsonify(results), 200
 
