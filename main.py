@@ -48,7 +48,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3-prod-hardening (async webhooks + auth + retries + idempotency)"
+BUILD = "v3.1-prod-hardening (async + auth + retries + idempotency + llm-retry)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 

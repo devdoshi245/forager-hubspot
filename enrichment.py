@@ -43,9 +43,15 @@ def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
     domain = (props.get("domain") or "").strip()
     name = (props.get("name") or "").strip()
 
-    if not force and (props.get("forager_org_id") or "").strip():
+    # Skip only if the company is BOTH enriched (forager_org_id) AND scored
+    # (icp_match_score) — so a company that missed scoring (e.g. a transient LLM
+    # 503/429 blip) is completed on the next run instead of being skipped forever.
+    # If scoring isn't configured at all, there's nothing to backfill, so skip too.
+    already_enriched = bool((props.get("forager_org_id") or "").strip())
+    already_scored = bool((props.get("icp_match_score") or "").strip())
+    if not force and already_enriched and (already_scored or scoring.provider() is None):
         return {"hubspot_company_id": hubspot_company_id, "status": "skipped",
-                "reason": "already enriched (forager_org_id present); use /enrich/company to force a refresh",
+                "reason": "already enriched + scored (or scoring disabled); use /enrich/company to force a refresh",
                 "domain": domain}
 
     org = forager.search_organization(domain=domain or None, name=name or None)

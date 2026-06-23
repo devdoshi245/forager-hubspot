@@ -67,7 +67,8 @@ _CONTACT_CUSTOM_PROPS = [
 
 _COMPANY_PROPS_TO_READ = (
     "name,domain,description,linkedin_company_page,numberofemployees,"
-    "annualrevenue,founded_year,city,state,country,industry,website,forager_org_id"
+    "annualrevenue,founded_year,city,state,country,industry,website,forager_org_id,"
+    "icp_match_score"
 )
 _CONTACT_PROPS_TO_READ = (
     "firstname,lastname,email,phone,jobtitle,city,state,country,linkedin_url,"

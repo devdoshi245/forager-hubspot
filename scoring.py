@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import re
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,33 @@ def _resolve_provider() -> str | None:
 def provider() -> str | None:
     """The scoring provider that will be used given the current env (or None)."""
     return _resolve_provider()
+
+
+# Free-tier LLM endpoints intermittently return 503 (overloaded) / 429 (rate
+# limited) — those are transient, so retry with backoff instead of leaving the
+# score blank. This runs on the background worker, so the short sleeps block nothing.
+_TRANSIENT = ("503", "unavailable", "overloaded", "429", "resource_exhausted",
+              "rate limit", "ratelimit", "too many requests", "timeout", "deadline",
+              "500", "502", "504", "temporarily")
+
+
+def _is_transient(exc: Exception) -> bool:
+    msg = f"{type(exc).__name__} {exc}".lower()
+    return any(token in msg for token in _TRANSIENT)
+
+
+def _retry(fn, attempts: int = 5, base_delay: float = 2.0):
+    """Call fn(); retry transient LLM errors (503/429/timeout) with exponential backoff."""
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            if i == attempts - 1 or not _is_transient(exc):
+                raise
+            delay = base_delay * (2 ** i)
+            logger.warning("LLM transient error (try %d/%d): %s — retrying in %.0fs",
+                           i + 1, attempts, exc, delay)
+            time.sleep(delay)
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +380,7 @@ def score_company(name: str, fields: dict) -> dict:
     domain = fields.get("domain", "") or ""
 
     try:
-        icp_raw = icp_fn(client, fields)
+        icp_raw = _retry(lambda: icp_fn(client, fields))
         out["icp"] = icp_raw
         if icp_raw:
             out["hubspot_fields"].update(_icp_to_hubspot(icp_raw))
@@ -361,7 +389,7 @@ def score_company(name: str, fields: dict) -> dict:
         out["icp"] = {"error": str(exc)}
 
     try:
-        logo_raw = logo_fn(client, name, domain)
+        logo_raw = _retry(lambda: logo_fn(client, name, domain))
         out["logo"] = logo_raw
         if logo_raw:
             out["hubspot_fields"].update(_logo_to_hubspot(logo_raw))
