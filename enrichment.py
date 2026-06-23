@@ -28,6 +28,14 @@ def _linkedin_slug(url: str) -> str | None:
     return None
 
 
+def _company_linkedin_slug(url: str) -> str | None:
+    """Extract the company slug from a LinkedIn company URL (.../company/<slug>)."""
+    if url and "linkedin.com/company/" in url:
+        slug = url.rstrip("/").split("/company/")[-1].split("?")[0].split("/")[0]
+        return slug or None
+    return None
+
+
 def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
     """Fetch a company from HubSpot, find it in Forager, write enriched fields back.
 
@@ -42,6 +50,11 @@ def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
     props = company.get("properties", {})
     domain = (props.get("domain") or "").strip()
     name = (props.get("name") or "").strip()
+    # Also accept a company LinkedIn URL as a resolver: when no domain is set,
+    # resolve the company by its LinkedIn handle (exact) — that fills in the
+    # website/domain + all other fields. When a domain IS set, the existing
+    # domain flow runs unchanged.
+    li_slug = _company_linkedin_slug(props.get("linkedin_company_page") or "")
 
     # Skip only if the company is BOTH enriched (forager_org_id) AND scored
     # (icp_match_score) — so a company that missed scoring (e.g. a transient LLM
@@ -54,9 +67,12 @@ def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
                 "reason": "already enriched + scored (or scoring disabled); use /enrich/company to force a refresh",
                 "domain": domain}
 
-    org = forager.search_organization(domain=domain or None, name=name or None)
+    org = forager.search_organization(
+        domain=domain or None, name=name or None,
+        linkedin_identifier=(li_slug if not domain else None),
+    )
     if not org:
-        return {"error": f"No Forager match for domain='{domain}' name='{name}'"}
+        return {"error": f"No Forager match for domain='{domain}' name='{name}' linkedin='{li_slug or ''}'"}
 
     fields = forager.parse_company_fields(org)
 

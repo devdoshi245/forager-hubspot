@@ -48,7 +48,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.5 (Forager industry -> custom 'Industry (Forager)' text field)"
+BUILD = "v3.6 (resolve company by LinkedIn URL when no domain given)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
