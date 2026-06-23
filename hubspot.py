@@ -74,7 +74,8 @@ _COMPANY_PROPS_TO_READ = (
     "icp_match_score"
 )
 _CONTACT_PROPS_TO_READ = (
-    "firstname,lastname,email,email_home,phone,jobtitle,city,state,country,linkedin_url,"
+    "firstname,lastname,email,email_home,phone,jobtitle,city,state,country,"
+    "linkedin_url,hs_linkedin_url,linkedin_profile,"
     "company,company_domain,company_linkedin_url,all_emails,all_phones,forager_person_id"
 )
 

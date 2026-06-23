@@ -28,6 +28,21 @@ def _linkedin_slug(url: str) -> str | None:
     return None
 
 
+# A contact's LinkedIn URL can live in several HubSpot fields depending on how it
+# was entered: HubSpot's built-in "LinkedIn URL" (hs_linkedin_url) when typed into
+# the standard field, our custom "LinkedIn Profile URL" (linkedin_url) when we write
+# it back, or the built-in "LinkedIn Profile" (linkedin_profile). Check them all.
+_CONTACT_LINKEDIN_FIELDS = ("linkedin_url", "hs_linkedin_url", "linkedin_profile")
+
+
+def _contact_linkedin_slug(props: dict) -> str | None:
+    for field in _CONTACT_LINKEDIN_FIELDS:
+        slug = _linkedin_slug(props.get(field) or "")
+        if slug:
+            return slug
+    return None
+
+
 def _company_linkedin_slug(url: str) -> str | None:
     """Extract the company slug from a LinkedIn company URL (.../company/<slug>)."""
     if url and "linkedin.com/company/" in url:
@@ -148,7 +163,7 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
             "reason": "already enriched (forager_person_id present)",
         }
 
-    slug = _linkedin_slug(props.get("linkedin_url") or "")
+    slug = _contact_linkedin_slug(props)
     firstname = (props.get("firstname") or "").strip()
     lastname = (props.get("lastname") or "").strip()
     company_name = (props.get("company") or "").strip()

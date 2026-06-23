@@ -48,7 +48,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.10 (fast ICP-only Claude self-test)"
+BUILD = "v3.11 (read contact LinkedIn from built-in 'LinkedIn URL' field too)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
