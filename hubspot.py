@@ -35,6 +35,7 @@ _COMPANY_CUSTOM_PROPS = [
     ("founded_year", "Founded Year"),
     ("forager_org_id", "Forager Org ID"),
     ("industry_forager", "Industry (Forager)"),
+    ("funding", "Funding"),  # filled from Deepline (Phase 2)
     # ICP fit scoring (Claude) — see scoring.py
     ("icp_match_score", "ICP Match Score", "number"),
     ("icp_decision", "ICP Decision"),                       # ICP | MAYBE | REMOVE
@@ -69,7 +70,7 @@ _CONTACT_CUSTOM_PROPS = [
 
 _COMPANY_PROPS_TO_READ = (
     "name,domain,description,linkedin_company_page,numberofemployees,"
-    "annualrevenue,founded_year,city,state,country,industry,industry_forager,website,forager_org_id,"
+    "annualrevenue,founded_year,city,state,country,industry,industry_forager,funding,website,forager_org_id,"
     "icp_match_score"
 )
 _CONTACT_PROPS_TO_READ = (

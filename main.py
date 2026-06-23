@@ -48,7 +48,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.7 (deeper contact scan; /debug/score-test diagnostic)"
+BUILD = "v3.8 (Funding company field added; manual-contact enrichment + Deepline next)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
