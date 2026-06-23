@@ -49,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.14 (profile-by-LinkedIn works: person_linkedin_public_identifiers, validated)"
+BUILD = "v3.15 (diagnose name+company path)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
@@ -197,6 +197,17 @@ def person_test():
     full-profile path works."""
     slug = request.args.get("slug") or "ankurbansal177"
     return jsonify(forager.probe_person_by_linkedin(slug)), 200
+
+
+@app.route("/debug/company-test", methods=["GET", "POST"])
+@require_secret
+def company_test():
+    """Diagnostic: for ?company=&first=&last=, report whether the company name resolves
+    to a domain and whether the person is findable by name. A search, ~0 credits."""
+    company = request.args.get("company") or "Apollo.io"
+    first = request.args.get("first") or "Ankur"
+    last = request.args.get("last") or "Bansal"
+    return jsonify(forager.probe_company_person(company, first, last)), 200
 
 
 # ---------------------------------------------------------------------------

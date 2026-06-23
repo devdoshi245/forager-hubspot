@@ -318,6 +318,55 @@ def probe_person_by_linkedin(linkedin_identifier: str) -> dict:
     return {"slug": linkedin_identifier, "attempts": report}
 
 
+def probe_company_person(company_name: str, firstname: str, lastname: str) -> dict:
+    """Diagnostic only (/debug/company-test): for a name + company, report (1) whether
+    the company resolves to a domain, (2) whether the person is findable by name — via
+    a direct person-name filter, and via paging the company's people (current method)."""
+    want = f"{firstname} {lastname}".strip().lower()
+    org = search_organization(name=company_name)
+    domain = (org or {}).get("domain")
+    out = {"input": {"company": company_name, "name": f"{firstname} {lastname}"},
+           "company_resolved": {"name": (org or {}).get("name"), "domain": domain}}
+
+    name_attempts = []
+    for param, val in (
+        ("full_name", f"{firstname} {lastname}"),
+        ("person_full_names", [f"{firstname} {lastname}"]),
+        ("full_names", [f"{firstname} {lastname}"]),
+        ("names", [f"{firstname} {lastname}"]),
+    ):
+        payload = {"page": 0, param: val}
+        if domain:
+            payload["organization_domains"] = [domain]
+        try:
+            data = _post("datastorage/person_role_search/", payload)
+            res = (data or {}).get("search_results", [])
+            m = next((r for r in res if f"{(r.get('person') or {}).get('first_name', '')} "
+                      f"{(r.get('person') or {}).get('last_name', '')}".strip().lower() == want), None)
+            name_attempts.append({"param": param, "count": len(res), "matched": bool(m)})
+        except Exception as exc:  # noqa: BLE001
+            name_attempts.append({"param": param, "error": str(exc)[:100]})
+    out["name_filter_attempts"] = name_attempts
+
+    if domain:
+        seen, found = [], None
+        for page in range(5):
+            roles = find_contacts_at_company(domain, page=page)
+            if not roles:
+                break
+            for r in roles:
+                p = r.get("person") or {}
+                nm = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip().lower()
+                if len(seen) < 10:
+                    seen.append(nm)
+                if nm == want:
+                    found = page
+            if found is not None:
+                break
+        out["paged_search"] = {"found_on_page": found, "sample_names_seen": seen}
+    return out
+
+
 # ---------------------------------------------------------------------------
 # CONTACT ENRICHMENT (emails + phones)
 # These endpoints return a bare JSON array. Accepts {"person_id": int} or
