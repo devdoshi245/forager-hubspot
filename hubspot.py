@@ -20,7 +20,11 @@ import re
 
 import requests
 
+import httpclient
+
 logger = logging.getLogger(__name__)
+
+_SESSION = httpclient.make_session()
 
 HUBSPOT_BASE = "https://api.hubapi.com"
 HUBSPOT_TOKEN = os.environ.get("HUBSPOT_TOKEN")
@@ -118,7 +122,7 @@ def _invalid_property_names(error_json: dict, candidates: dict) -> list[str]:
 def _write_with_retry(method: str, url: str, properties: dict) -> dict:
     """PATCH/POST properties, dropping any property HubSpot rejects, then retry."""
     clean = _clean(properties)
-    func = getattr(requests, method)
+    func = getattr(_SESSION, method)
     for _ in range(len(clean) + 1):
         resp = func(url, json={"properties": clean}, headers=_headers(), timeout=30)
         if resp.status_code == 400 and clean:
@@ -160,7 +164,7 @@ def _create_properties(object_type: str, group: str, props: list[tuple]) -> None
             "groupName": group,
         }
         try:
-            resp = requests.post(
+            resp = _SESSION.post(
                 f"{HUBSPOT_BASE}/crm/v3/properties/{object_type}",
                 json=body, headers=_headers(), timeout=30,
             )
@@ -181,7 +185,7 @@ def _create_properties(object_type: str, group: str, props: list[tuple]) -> None
 # Companies
 # ---------------------------------------------------------------------------
 def get_company(company_id: str) -> dict | None:
-    resp = requests.get(
+    resp = _SESSION.get(
         f"{HUBSPOT_BASE}/crm/v3/objects/companies/{company_id}",
         headers=_headers(), params={"properties": _COMPANY_PROPS_TO_READ}, timeout=30,
     )
@@ -197,7 +201,7 @@ def find_company_by_domain(domain: str) -> dict | None:
         "properties": ["name", "domain"],
         "limit": 1,
     }
-    resp = requests.post(
+    resp = _SESSION.post(
         f"{HUBSPOT_BASE}/crm/v3/objects/companies/search", json=body, headers=_headers(), timeout=30,
     )
     resp.raise_for_status()
@@ -215,7 +219,7 @@ def create_company(properties: dict) -> dict:
 
 def get_contacts_for_company(company_id: str) -> list[dict]:
     """Return full contact records associated with a company (via v4 associations)."""
-    resp = requests.get(
+    resp = _SESSION.get(
         f"{HUBSPOT_BASE}/crm/v4/objects/companies/{company_id}/associations/contacts",
         headers=_headers(), timeout=30,
     )
@@ -236,7 +240,7 @@ def get_contacts_for_company(company_id: str) -> list[dict]:
 # Contacts
 # ---------------------------------------------------------------------------
 def get_contact(contact_id: str) -> dict | None:
-    resp = requests.get(
+    resp = _SESSION.get(
         f"{HUBSPOT_BASE}/crm/v3/objects/contacts/{contact_id}",
         headers=_headers(), params={"properties": _CONTACT_PROPS_TO_READ}, timeout=30,
     )
@@ -252,7 +256,7 @@ def find_contact_by_email(email: str) -> dict | None:
         "properties": ["firstname", "lastname", "email"],
         "limit": 1,
     }
-    resp = requests.post(
+    resp = _SESSION.post(
         f"{HUBSPOT_BASE}/crm/v3/objects/contacts/search", json=body, headers=_headers(), timeout=30,
     )
     resp.raise_for_status()
@@ -272,7 +276,7 @@ def create_contact(properties: dict) -> dict:
 # Associations (v4 default association)
 # ---------------------------------------------------------------------------
 def associate_contact_to_company(contact_id: str, company_id: str) -> None:
-    resp = requests.put(
+    resp = _SESSION.put(
         f"{HUBSPOT_BASE}/crm/v4/objects/contacts/{contact_id}/associations/default/companies/{company_id}",
         headers=_headers(), timeout=30,
     )

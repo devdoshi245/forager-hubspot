@@ -3,19 +3,31 @@ main.py
 -------
 Flask webhook + manual-trigger server for the Forager x HubSpot enrichment automation.
 
+Webhook events are authenticated, ACKed immediately, and processed on a background
+worker — so a slow enrichment (the LLM logo web-search can take tens of seconds) can't
+trip HubSpot's delivery timeout and trigger retries / double Forager-credit spend. The
+manual /enrich/* endpoints run synchronously and return the result to the caller.
+
+Sensitive endpoints (webhooks, /enrich/*, /debug/*) require APP_SECRET when it is set
+(send it as header `X-App-Secret` or query `?token=`). `/` and `/health` stay public.
+
 Endpoints:
-  GET  /                      Service info
-  GET  /health                Health check -> {"status": "ok"}
-  POST /webhook/company       HubSpot "company created" (body: [{"objectId": ...}])
-  POST /webhook/contact       HubSpot "contact created" (body: [{"objectId": ...}])
-  POST /enrich/company        Manual: {"company_id": "123"}
-  POST /enrich/contact        Manual: {"contact_id": "123"}
-  POST /enrich/find-contacts  Manual: {"company_id","company_domain","job_title_filter","max_contacts"}
-  POST /enrich/demo           Demo: {"company_id": "123"} -> full company pipeline
+  GET  /                       Service info / build
+  GET  /health                 Health check + queue depth
+  GET  /debug/config           Which integrations are configured (no secrets)   [auth]
+  GET/POST /debug/alert-test    Send a test error email                          [auth]
+  POST /webhook                 HubSpot single Target URL (routes all events)    [auth]
+  POST /webhook/company         Company-created handler                          [auth]
+  POST /webhook/contact         Contact-created handler                          [auth]
+  POST /enrich/company          Manual {"company_id"} (forces a refresh)         [auth]
+  POST /enrich/contact          Manual {"contact_id"}                            [auth]
+  POST /enrich/find-contacts    Manual {"company_id","company_domain",...}       [auth]
+  POST /enrich/demo             Full company pipeline {"company_id"}             [auth]
 """
 
 import logging
 import os
+from functools import wraps
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -23,9 +35,12 @@ from werkzeug.exceptions import HTTPException
 
 load_dotenv()
 
-import alerts      # noqa: E402  (must import after load_dotenv so env vars are set)
-import enrichment  # noqa: E402
-import hubspot     # noqa: E402
+import alerts       # noqa: E402  (import after load_dotenv so env vars are set)
+import auth         # noqa: E402
+import background   # noqa: E402
+import enrichment   # noqa: E402
+import hubspot      # noqa: E402
+import scoring      # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,21 +48,57 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+BUILD = "v3-prod-hardening (async webhooks + auth + retries + idempotency)"
+
+_REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
+
+
+def _missing_required_env() -> list:
+    return [name for name in _REQUIRED_ENV if not os.environ.get(name)]
+
+
+# Fail LOUD at startup if the must-have credentials are absent (instead of a silent
+# 500 on the first request). The service still boots so /health and /debug/config work.
+_missing = _missing_required_env()
+if _missing:
+    logger.critical("MISSING REQUIRED ENV VARS: %s — enrichment will fail until these are set.",
+                    ", ".join(_missing))
+if not auth.is_enabled():
+    logger.warning("APP_SECRET is not set — sensitive endpoints are OPEN. Set it before going live.")
+
 app = Flask(__name__)
 
-# Make sure the custom HubSpot fields exist as soon as the server boots, so a
-# user can populate (e.g.) linkedin_url on a contact before the first webhook.
+# Create custom HubSpot properties up front, and start the background worker that
+# drains the webhook queue.
 try:
     hubspot.ensure_custom_properties()
 except Exception as exc:  # noqa: BLE001
     logger.warning("ensure_custom_properties() at startup failed: %s", exc)
+background.start_worker()
+
+
+def require_secret(fn):
+    """Gate a sensitive endpoint behind the shared secret (enforced only when
+    APP_SECRET is configured — see auth.py)."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not auth.authorize(request):
+            return jsonify({"error": "unauthorized"}), 401
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def _int_arg(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 @app.errorhandler(Exception)
 def handle_uncaught(error):
-    """Return clean JSON instead of a 500 HTML page for unhandled errors, and
-    surface upstream issues clearly — notably Forager returning HTTP 402 when the
-    account is out of credits."""
+    """Return clean JSON instead of a 500 HTML page for unhandled errors, and surface
+    upstream issues clearly — notably Forager returning HTTP 402 (out of credits)."""
     if isinstance(error, HTTPException):
         return error  # let Flask render 404/405/etc. normally
     logger.exception("Unhandled error while handling request")
@@ -74,111 +125,148 @@ def index():
     return jsonify({
         "service": "Forager x HubSpot Enrichment Automation",
         "status": "running",
-        "build": "v2-buyer-committee-filter+icp+logo-scoring+email-alerts",
+        "build": BUILD,
+        "auth_enabled": auth.is_enabled(),
         "endpoints": [
             "GET  /health",
-            "POST /webhook  (HubSpot single target URL - routes all events)",
-            "POST /webhook/company",
-            "POST /webhook/contact",
-            "POST /enrich/company",
-            "POST /enrich/contact",
-            "POST /enrich/find-contacts",
-            "POST /enrich/demo",
-            "GET/POST /debug/alert-test  (send a test error email)",
+            "GET  /debug/config          [auth]",
+            "GET/POST /debug/alert-test  [auth]",
+            "POST /webhook               [auth]  (HubSpot single Target URL)",
+            "POST /webhook/company       [auth]",
+            "POST /webhook/contact       [auth]",
+            "POST /enrich/company        [auth]",
+            "POST /enrich/contact        [auth]",
+            "POST /enrich/find-contacts  [auth]",
+            "POST /enrich/demo           [auth]",
         ],
     }), 200
 
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok", "queue_depth": background.queue_size()}), 200
+
+
+@app.route("/debug/config", methods=["GET"])
+@require_secret
+def debug_config():
+    """Readiness check — what's configured, without secrets and without spending any
+    Forager credits. Useful to confirm you're ready before creating a company."""
+    return jsonify({
+        "build": BUILD,
+        "required_env_ok": not _missing_required_env(),
+        "missing_required_env": _missing_required_env(),
+        "auth_enabled": auth.is_enabled(),
+        "scoring_provider": scoring.provider(),   # "gemini" | "anthropic" | null
+        "alerts_configured": alerts.is_configured(),
+        "queue_depth": background.queue_size(),
+    }), 200
 
 
 @app.route("/debug/alert-test", methods=["GET", "POST"])
+@require_secret
 def alert_test():
-    """Fire a harmless test alert so you can confirm email config without a real failure.
-
-    Returns the ACTUAL SMTP error (and the non-secret config) when the send fails,
-    so a 'email_sent: false' is self-diagnosing instead of silent."""
+    """Send a harmless test alert; returns the ACTUAL SMTP error + non-secret config
+    when the send fails, so 'email_sent: false' is self-diagnosing."""
     return jsonify(alerts.test_send()), 200
 
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    """Unified HubSpot webhook endpoint.
+# ---------------------------------------------------------------------------
+# Webhooks: authenticate, enqueue, ACK 200 immediately. The slow pipeline runs
+# on the background worker (background.py) so HubSpot never waits / retries.
+# ---------------------------------------------------------------------------
+def _process_company_event(object_id: str, job_title_filter, max_contacts: int) -> None:
+    try:
+        enrichment.handle_company_webhook(object_id, job_title_filter, max_contacts)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Background company enrichment failed for %s", object_id)
+        alerts.send_error_alert(f"Company enrichment failed: {object_id}", error=exc,
+                                context={"objectId": object_id, "type": "company"})
 
-    A HubSpot Private App posts EVERY event subscription to a single Target URL,
-    so we route each event to the right handler by its subscriptionType
-    (e.g. 'company.creation' vs 'contact.creation')."""
+
+def _process_contact_event(object_id: str) -> None:
+    try:
+        enrichment.handle_contact_webhook(object_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Background contact enrichment failed for %s", object_id)
+        alerts.send_error_alert(f"Contact enrichment failed: {object_id}", error=exc,
+                                context={"objectId": object_id, "type": "contact"})
+
+
+@app.route("/webhook", methods=["POST"])
+@require_secret
+def webhook():
+    """Unified HubSpot webhook Target URL — routes company + contact events by their
+    subscriptionType. Authenticated, enqueued, ACKed immediately."""
     payload = request.get_json(force=True, silent=True) or []
-    logger.info("/webhook received %d event(s): %s", len(payload), payload)
+    logger.info("/webhook received %d event(s)", len(payload))
     job_title_filter = request.args.get("job_title_filter")
-    max_contacts = int(request.args.get("max_contacts", 5))
-    results = []
+    max_contacts = _int_arg(request.args.get("max_contacts"), 5)
+    accepted = 0
     for event in payload:
         object_id = str(event.get("objectId", ""))
         subscription = (event.get("subscriptionType") or "").lower()
         if not object_id:
             continue
-        try:
-            if subscription.startswith("company"):
-                results.append({"type": "company", "objectId": object_id,
-                                "result": enrichment.handle_company_webhook(object_id, job_title_filter, max_contacts)})
-            elif subscription.startswith("contact"):
-                results.append({"type": "contact", "objectId": object_id,
-                                "result": enrichment.handle_contact_webhook(object_id)})
-            else:
-                results.append({"type": "unknown", "objectId": object_id,
-                                "subscriptionType": subscription, "skipped": True})
-        except Exception as exc:  # noqa: BLE001 - never fail the batch / trigger HubSpot retries
-            logger.exception("Webhook processing failed for %s %s", subscription, object_id)
-            results.append({"type": subscription or "unknown", "objectId": object_id, "error": str(exc)})
-            alerts.send_error_alert(
-                f"Webhook processing failed: {subscription or 'unknown'} {object_id}",
-                error=exc,
-                context={"endpoint": "/webhook", "subscriptionType": subscription, "objectId": object_id},
-            )
-    # Always 200 so HubSpot doesn't retry a permanent failure (e.g. out of credits).
-    return jsonify(results), 200
+        if subscription.startswith("company"):
+            background.enqueue(_process_company_event, object_id, job_title_filter, max_contacts)
+            accepted += 1
+        elif subscription.startswith("contact"):
+            background.enqueue(_process_contact_event, object_id)
+            accepted += 1
+        else:
+            logger.info("/webhook ignoring event with subscriptionType=%r", subscription)
+    return jsonify({"accepted": accepted, "queue_depth": background.queue_size()}), 200
 
 
 @app.route("/webhook/company", methods=["POST"])
+@require_secret
 def webhook_company():
     payload = request.get_json(force=True, silent=True) or []
-    logger.info("/webhook/company received: %s", payload)
+    logger.info("/webhook/company received %d event(s)", len(payload))
     job_title_filter = request.args.get("job_title_filter")
-    results = []
+    max_contacts = _int_arg(request.args.get("max_contacts"), 5)
+    accepted = 0
     for event in payload:
         company_id = str(event.get("objectId", ""))
         if not company_id:
             continue
-        results.append(enrichment.handle_company_webhook(company_id, job_title_filter))
-    return jsonify(results), 200
+        background.enqueue(_process_company_event, company_id, job_title_filter, max_contacts)
+        accepted += 1
+    return jsonify({"accepted": accepted, "queue_depth": background.queue_size()}), 200
 
 
 @app.route("/webhook/contact", methods=["POST"])
+@require_secret
 def webhook_contact():
     payload = request.get_json(force=True, silent=True) or []
-    logger.info("/webhook/contact received: %s", payload)
-    results = []
+    logger.info("/webhook/contact received %d event(s)", len(payload))
+    accepted = 0
     for event in payload:
         contact_id = str(event.get("objectId", ""))
         if not contact_id:
             continue
-        results.append(enrichment.handle_contact_webhook(contact_id))
-    return jsonify(results), 200
+        background.enqueue(_process_contact_event, contact_id)
+        accepted += 1
+    return jsonify({"accepted": accepted, "queue_depth": background.queue_size()}), 200
 
 
+# ---------------------------------------------------------------------------
+# Manual triggers: synchronous — the caller wants the result inline.
+# ---------------------------------------------------------------------------
 @app.route("/enrich/company", methods=["POST"])
+@require_secret
 def manual_enrich_company():
     body = request.get_json(force=True, silent=True) or {}
     company_id = body.get("company_id")
     if not company_id:
         return jsonify({"error": "company_id required"}), 400
-    return jsonify(enrichment.enrich_company(str(company_id))), 200
+    # Manual trigger forces a refresh even if already enriched.
+    return jsonify(enrichment.enrich_company(str(company_id), force=True)), 200
 
 
 @app.route("/enrich/contact", methods=["POST"])
+@require_secret
 def manual_enrich_contact():
     body = request.get_json(force=True, silent=True) or {}
     contact_id = body.get("contact_id")
@@ -188,12 +276,13 @@ def manual_enrich_contact():
 
 
 @app.route("/enrich/find-contacts", methods=["POST"])
+@require_secret
 def manual_find_contacts():
     body = request.get_json(force=True, silent=True) or {}
     company_id = body.get("company_id")
     company_domain = body.get("company_domain")
     job_title = body.get("job_title_filter")
-    max_contacts = int(body.get("max_contacts", 5))
+    max_contacts = _int_arg(body.get("max_contacts"), 5)
     if not company_id or not company_domain:
         return jsonify({"error": "company_id and company_domain required"}), 400
     results = enrichment.find_and_create_contacts(
@@ -206,14 +295,17 @@ def manual_find_contacts():
 
 
 @app.route("/enrich/demo", methods=["POST"])
+@require_secret
 def demo():
     body = request.get_json(force=True, silent=True) or {}
     company_id = body.get("company_id")
     if not company_id:
         return jsonify({"error": "company_id required"}), 400
     job_title_filter = request.args.get("job_title_filter")
-    max_contacts = int(request.args.get("max_contacts", body.get("max_contacts", 5)))
-    return jsonify(enrichment.handle_company_webhook(str(company_id), job_title_filter, max_contacts)), 200
+    max_contacts = _int_arg(request.args.get("max_contacts", body.get("max_contacts")), 5)
+    # Demo runs the full pipeline synchronously and forces a refresh so you always see results.
+    return jsonify(enrichment.handle_company_webhook(
+        str(company_id), job_title_filter, max_contacts, force=True)), 200
 
 
 if __name__ == "__main__":

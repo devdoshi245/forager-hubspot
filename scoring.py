@@ -144,6 +144,11 @@ def _resolve_provider() -> str | None:
     return None
 
 
+def provider() -> str | None:
+    """The scoring provider that will be used given the current env (or None)."""
+    return _resolve_provider()
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -239,7 +244,7 @@ def _logo_to_hubspot(data: dict) -> dict:
 # ---------------------------------------------------------------------------
 def _anthropic_client():
     import anthropic  # imported lazily so the package is optional
-    return anthropic.Anthropic()
+    return anthropic.Anthropic(timeout=90.0)  # bound a slow web-search turn
 
 
 def _anthropic_text(response) -> str:
@@ -278,7 +283,11 @@ def _logo_anthropic(client, name: str, domain: str = "") -> dict | None:
 def _gemini_client():
     from google import genai  # imported lazily so the package is optional
     # Client() reads GEMINI_API_KEY / GOOGLE_API_KEY from the environment.
-    return genai.Client()
+    try:  # bound a slow grounded turn; http_options shape varies by SDK version
+        from google.genai import types
+        return genai.Client(http_options=types.HttpOptions(timeout=90_000))  # ms
+    except Exception:  # noqa: BLE001
+        return genai.Client()
 
 
 def _icp_gemini(client, fields: dict) -> dict | None:

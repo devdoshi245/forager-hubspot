@@ -24,7 +24,11 @@ import re
 
 import requests
 
+import httpclient
+
 logger = logging.getLogger(__name__)
+
+_SESSION = httpclient.make_session()
 
 FORAGER_BASE = "https://api-v2.forager.ai/api"
 FORAGER_API_KEY = os.environ.get("FORAGER_API_KEY")
@@ -51,7 +55,7 @@ def _url(path: str) -> str:
 
 
 def _post(path: str, payload: dict) -> dict | list:
-    resp = requests.post(_url(path), json=payload, headers=_headers(), timeout=60)
+    resp = _SESSION.post(_url(path), json=payload, headers=_headers(), timeout=60)
     resp.raise_for_status()
     return resp.json()
 

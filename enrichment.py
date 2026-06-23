@@ -28,8 +28,12 @@ def _linkedin_slug(url: str) -> str | None:
     return None
 
 
-def enrich_company(hubspot_company_id: str) -> dict:
-    """Fetch a company from HubSpot, find it in Forager, write enriched fields back."""
+def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
+    """Fetch a company from HubSpot, find it in Forager, write enriched fields back.
+
+    Idempotent by default: if the company already carries a forager_org_id (we have
+    enriched it before), it is skipped unless force=True. This stops a duplicate
+    webhook delivery from re-running the Forager search + LLM scoring and re-spending."""
     hubspot.ensure_custom_properties()
     company = hubspot.get_company(hubspot_company_id)
     if not company:
@@ -38,6 +42,11 @@ def enrich_company(hubspot_company_id: str) -> dict:
     props = company.get("properties", {})
     domain = (props.get("domain") or "").strip()
     name = (props.get("name") or "").strip()
+
+    if not force and (props.get("forager_org_id") or "").strip():
+        return {"hubspot_company_id": hubspot_company_id, "status": "skipped",
+                "reason": "already enriched (forager_org_id present); use /enrich/company to force a refresh",
+                "domain": domain}
 
     org = forager.search_organization(domain=domain or None, name=name or None)
     if not org:
@@ -232,9 +241,9 @@ def find_and_create_contacts(
 
 
 def handle_company_webhook(hubspot_company_id: str, job_title_filter: str | None = None,
-                           max_contacts: int = 5) -> dict:
+                           max_contacts: int = 5, force: bool = False) -> dict:
     """Company-created pipeline: enrich company -> enrich existing contacts -> find new ones."""
-    company_result = enrich_company(hubspot_company_id)
+    company_result = enrich_company(hubspot_company_id, force=force)
     if "error" in company_result:
         return company_result
 
