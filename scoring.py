@@ -7,23 +7,14 @@ recognizability", parallel to Forager enrichment):
   1. ICP fit scoring      - is this company a good fit for Forager.ai? (text only)
   2. Logo recognizability - how known is the brand in its B2B category? (web search)
 
-Pluggable LLM provider so you can test on a free key now and switch to Claude for
-the client later with NO code change:
+Scoring runs on Anthropic / Claude:
 
-  SCORING_PROVIDER   "gemini" | "anthropic". If unset, auto-detects from whichever
-                     key is present (Gemini wins if both are set).
+  ANTHROPIC_API_KEY  required for scoring; without it, scoring is skipped
+                     gracefully and company enrichment still runs.
+  ANTHROPIC_MODEL    optional; defaults to claude-opus-4-8
 
-  Gemini (free tier — recommended for testing; logo uses Google Search grounding):
-    GEMINI_API_KEY   (or GOOGLE_API_KEY)   key from aistudio.google.com
-    GEMINI_MODEL     optional; defaults to gemini-2.5-flash
-
-  Anthropic / Claude (for the client):
-    ANTHROPIC_API_KEY
-    ANTHROPIC_MODEL  optional; defaults to claude-opus-4-8
-
-If no provider is configured (no key), scoring is skipped gracefully and company
-enrichment still runs. Web search / LLM usage is billed to the LLM account, NOT
-Forager credits.
+The logo step uses Claude's server-side web search. LLM + web-search usage is
+billed to the Anthropic account, NOT Forager credits.
 """
 
 import json
@@ -34,9 +25,7 @@ import time
 
 logger = logging.getLogger(__name__)
 
-_PROVIDER = os.environ.get("SCORING_PROVIDER", "").strip().lower()
 _ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
-_GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 # Anthropic server-side web search tool (Claude runs the searches itself).
 _WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 5}
 
@@ -136,13 +125,7 @@ company_name:"""
 # Provider resolution
 # ---------------------------------------------------------------------------
 def _resolve_provider() -> str | None:
-    if _PROVIDER in ("gemini", "anthropic"):
-        return _PROVIDER
-    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
-        return "gemini"
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return "anthropic"
-    return None
+    return "anthropic" if os.environ.get("ANTHROPIC_API_KEY") else None
 
 
 def provider() -> str | None:
@@ -305,50 +288,8 @@ def _logo_anthropic(client, name: str, domain: str = "") -> dict | None:
     return _extract_json(_anthropic_text(response))
 
 
-# ---------------------------------------------------------------------------
-# Google Gemini backend (free tier; logo uses Google Search grounding)
-# ---------------------------------------------------------------------------
-def _gemini_client():
-    from google import genai  # imported lazily so the package is optional
-    # Client() reads GEMINI_API_KEY / GOOGLE_API_KEY from the environment.
-    try:  # bound a slow grounded turn; http_options shape varies by SDK version
-        from google.genai import types
-        return genai.Client(http_options=types.HttpOptions(timeout=90_000))  # ms
-    except Exception:  # noqa: BLE001
-        return genai.Client()
-
-
-def _icp_gemini(client, fields: dict) -> dict | None:
-    from google.genai import types
-    response = client.models.generate_content(
-        model=_GEMINI_MODEL,
-        contents=_icp_user(fields),
-        config=types.GenerateContentConfig(
-            system_instruction=_ICP_SYSTEM,
-            response_mime_type="application/json",  # safe: no tools on this call
-        ),
-    )
-    return _extract_json(getattr(response, "text", None))
-
-
-def _logo_gemini(client, name: str, domain: str = "") -> dict | None:
-    from google.genai import types
-    # Google Search grounding can't be combined with response_mime_type=json,
-    # so we parse the JSON out of the text (the prompt enforces JSON-only).
-    response = client.models.generate_content(
-        model=_GEMINI_MODEL,
-        contents=_logo_user(name, domain),
-        config=types.GenerateContentConfig(
-            system_instruction=_LOGO_SYSTEM,
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-        ),
-    )
-    return _extract_json(getattr(response, "text", None))
-
-
 _BACKENDS = {
     "anthropic": (_anthropic_client, _icp_anthropic, _logo_anthropic),
-    "gemini": (_gemini_client, _icp_gemini, _logo_gemini),
 }
 
 
@@ -364,7 +305,7 @@ def score_company(name: str, fields: dict) -> dict:
     provider = _resolve_provider()
     if not provider:
         out["status"] = "skipped"
-        out["reason"] = "no scoring provider configured (set GEMINI_API_KEY or ANTHROPIC_API_KEY)"
+        out["reason"] = "no scoring provider configured (set ANTHROPIC_API_KEY)"
         return out
 
     try:

@@ -48,7 +48,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.2 (contact email -> Email Home custom field; company city/state/country)"
+BUILD = "v3.3 (Claude-only scoring; title-match contacts; Email Home + company state)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 

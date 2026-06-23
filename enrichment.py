@@ -204,17 +204,10 @@ def find_and_create_contacts(
             scanned += 1
             slug = (person.get("linkedin_info") or {}).get("public_identifier")
 
-            # Email is the gate: look it up first, and if there's none, skip this
-            # person without paying for the (more expensive) phone lookup.
+            # The buyer-committee title match is now the ONLY gate. Pull email +
+            # phone if Forager has them (email lands in Email Home), but do NOT
+            # require an email — every title-matched contact is dumped regardless.
             emails = forager.get_person_emails(person_id=person_id, linkedin_identifier=slug)
-            if not emails:
-                results.append({
-                    "name": f"{person.get('first_name', '')} {person.get('last_name', '')}".strip(),
-                    "action": "skipped",
-                    "reason": "no email available",
-                })
-                continue
-
             phones = forager.get_person_phones(person_id=person_id, linkedin_identifier=slug)
             fields = forager.parse_person_fields(role, emails, phones)
 
