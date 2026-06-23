@@ -48,7 +48,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.1-prod-hardening (async + auth + retries + idempotency + llm-retry)"
+BUILD = "v3.2 (contact email -> Email Home custom field; company city/state/country)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 

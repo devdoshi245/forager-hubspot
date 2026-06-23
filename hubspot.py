@@ -54,6 +54,7 @@ _COMPANY_CUSTOM_PROPS = [
     ("logo_evidence", "Logo Evidence"),
 ]
 _CONTACT_CUSTOM_PROPS = [
+    ("email_home", "Email Home"),
     ("linkedin_url", "LinkedIn Profile URL"),
     ("company_domain", "Company Domain"),
     ("company_linkedin_url", "Company LinkedIn URL"),
@@ -71,7 +72,7 @@ _COMPANY_PROPS_TO_READ = (
     "icp_match_score"
 )
 _CONTACT_PROPS_TO_READ = (
-    "firstname,lastname,email,phone,jobtitle,city,state,country,linkedin_url,"
+    "firstname,lastname,email,email_home,phone,jobtitle,city,state,country,linkedin_url,"
     "company,company_domain,company_linkedin_url,all_emails,all_phones,forager_person_id"
 )
 
@@ -255,6 +256,24 @@ def find_contact_by_email(email: str) -> dict | None:
     body = {
         "filterGroups": [{"filters": [{"propertyName": "email", "operator": "EQ", "value": email}]}],
         "properties": ["firstname", "lastname", "email"],
+        "limit": 1,
+    }
+    resp = _SESSION.post(
+        f"{HUBSPOT_BASE}/crm/v3/objects/contacts/search", json=body, headers=_headers(), timeout=30,
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    return results[0] if results else None
+
+
+def find_contact_by_email_home(email: str) -> dict | None:
+    """Dedup lookup on our custom Email Home property. The built-in email field is
+    left empty on purpose, so HubSpot's native email uniqueness can't be relied on."""
+    if not email:
+        return None
+    body = {
+        "filterGroups": [{"filters": [{"propertyName": "email_home", "operator": "EQ", "value": email}]}],
+        "properties": ["firstname", "lastname", "email_home"],
         "limit": 1,
     }
     resp = _SESSION.post(

@@ -182,6 +182,29 @@ def _clean_linkedin_url(url: str) -> str:
     return _DUP_LINKEDIN_RE.sub(r"\1\2", url)
 
 
+def _company_location(org: dict) -> dict:
+    """City / state / country for a company, robust to Forager's varying shapes.
+
+    Forager's flat company address often carries city + country but an EMPTY state,
+    while the richer ``osm_locations`` structure (the same one used for people) does
+    include the state/region. So we read the flat address first, then backfill any
+    missing piece from osm_locations on the address or the org."""
+    addresses = org.get("addresses") or []
+    addr = addresses[0] if isinstance(addresses, list) and addresses else {}
+    city = (addr.get("city") or "").strip()
+    state = (addr.get("state") or addr.get("region") or addr.get("state_name") or "").strip()
+    country = (addr.get("country") or "").strip()
+    if not (city and state and country):
+        for loc in (addr, addr.get("location"), org.get("location")):
+            if isinstance(loc, dict) and loc.get("osm_locations"):
+                parts = _location_parts(loc)
+                city = city or parts["city"]
+                state = state or parts["state"]
+                country = country or parts["country"]
+                break
+    return {"city": city, "state": state, "country": country}
+
+
 def parse_company_fields(org: dict) -> dict:
     """Flatten a Forager org record into HubSpot company properties."""
     if not org:
@@ -189,9 +212,8 @@ def parse_company_fields(org: dict) -> dict:
     li = org.get("linkedin_info") or {}
     industry = (li.get("industry") or {}).get("name", "")
     finance = org.get("finance_info") or {}
-    addresses = org.get("addresses") or []
-    addr = addresses[0] if addresses else {}
     founded = org.get("founded_date") or ""
+    loc = _company_location(org)
     return {
         "name": org.get("name", "") or "",
         "domain": org.get("domain", "") or "",
@@ -200,9 +222,9 @@ def parse_company_fields(org: dict) -> dict:
         "numberofemployees": org.get("employees_amount"),
         "annualrevenue": finance.get("revenue"),
         "founded_year": founded[:4] if founded else "",
-        "city": addr.get("city", "") or "",
-        "state": addr.get("state", "") or "",
-        "country": addr.get("country", "") or "",
+        "city": loc["city"],
+        "state": loc["state"],
+        "country": loc["country"],
         "industry": industry,
         "website": org.get("website", "") or "",
         "forager_org_id": str(org.get("id", "")),
@@ -308,7 +330,7 @@ def parse_person_fields(role: dict, emails: list, phones: list) -> dict:
         "firstname": person.get("first_name", "") or "",
         "lastname": person.get("last_name", "") or "",
         "jobtitle": role.get("role_title", "") or "",
-        "email": emails[0] if emails else "",
+        "email_home": emails[0] if emails else "",
         "phone": phones[0] if phones else "",
         "city": location["city"],
         "state": location["state"],

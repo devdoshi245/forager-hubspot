@@ -114,7 +114,7 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
 
     update: dict = {}
     if emails:
-        update["email"] = emails[0]
+        update["email_home"] = emails[0]
         update["all_emails"] = ", ".join(emails)
     if phones:
         update["phone"] = phones[0]
@@ -161,7 +161,6 @@ def find_and_create_contacts(
         pid = (cp.get("forager_person_id") or "").strip()
         if pid:
             seen_person_ids.add(pid)
-        if (cp.get("email") or "").strip():
             already += 1
 
     needed = max_contacts - already
@@ -219,7 +218,7 @@ def find_and_create_contacts(
             phones = forager.get_person_phones(person_id=person_id, linkedin_identifier=slug)
             fields = forager.parse_person_fields(role, emails, phones)
 
-            existing = hubspot.find_contact_by_email(fields["email"])
+            existing = hubspot.find_contact_by_email_home(fields["email_home"])
             if existing:
                 contact_id = existing["id"]
                 hubspot.update_contact(contact_id, fields)
@@ -238,7 +237,7 @@ def find_and_create_contacts(
             results.append({
                 "contact_id": contact_id,
                 "name": f"{fields.get('firstname', '')} {fields.get('lastname', '')}".strip(),
-                "email": fields.get("email"),
+                "email_home": fields.get("email_home"),
                 "phone": fields.get("phone"),
                 "title": fields.get("jobtitle"),
                 "action": action,
