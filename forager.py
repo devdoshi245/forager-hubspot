@@ -225,7 +225,7 @@ def parse_company_fields(org: dict) -> dict:
         "city": loc["city"],
         "state": loc["state"],
         "country": loc["country"],
-        "industry": industry,
+        "industry_forager": industry,
         "website": org.get("website", "") or "",
         "forager_org_id": str(org.get("id", "")),
     }
