@@ -191,7 +191,11 @@ def find_and_create_contacts(
     candidate_budget = needed * 2
     scanned = 0
     page = 0
-    MAX_PAGES = 3
+    # Scan deeper: the buyer-committee filter is narrow, so for large / non-SaaS
+    # companies the qualifying titles can be sparse on the first pages. People who
+    # don't match are skipped for free, and credits are still only spent on matches
+    # (up to max_contacts), so a deeper scan costs nothing extra in Forager credits.
+    MAX_PAGES = 10
     while needed > 0 and page < MAX_PAGES and scanned < candidate_budget:
         # Fetch the broad set of current people (no Forager-side title filter) so
         # we can apply the full buyer-committee list locally.

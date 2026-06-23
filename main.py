@@ -48,7 +48,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.6 (resolve company by LinkedIn URL when no domain given)"
+BUILD = "v3.7 (deeper contact scan; /debug/score-test diagnostic)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
@@ -169,6 +169,27 @@ def alert_test():
     """Send a harmless test alert; returns the ACTUAL SMTP error + non-secret config
     when the send fails, so 'email_sent: false' is self-diagnosing."""
     return jsonify(alerts.test_send()), 200
+
+
+@app.route("/debug/score-test", methods=["GET", "POST"])
+@require_secret
+def score_test():
+    """Run scoring on a sample company and return the raw result + any error, so a
+    blank ICP/logo is self-diagnosing. Uses the LLM account only (no Forager credits).
+    May take ~30-60s because the logo step does a live web search."""
+    sample = {
+        "name": "Stripe", "domain": "stripe.com",
+        "description": "Payments infrastructure and financial APIs for internet businesses.",
+        "industry": "Financial Services", "numberofemployees": 8000,
+    }
+    result = scoring.score_company("Stripe", sample)
+    return jsonify({
+        "provider": scoring.provider(),
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+        "icp": result.get("icp"),
+        "logo": result.get("logo"),
+    }), 200
 
 
 # ---------------------------------------------------------------------------
