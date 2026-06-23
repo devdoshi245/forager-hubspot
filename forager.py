@@ -261,26 +261,23 @@ def _role_person_slug(role: dict) -> str:
 def find_person_by_linkedin(linkedin_identifier: str) -> dict | None:
     """Look up one person's role record (full profile) DIRECTLY by LinkedIn id.
 
-    CRITICAL: person_role_search silently ignores a filter it doesn't recognise and
-    returns an ARBITRARY person, so we VALIDATE that the returned person's LinkedIn
-    slug actually matches before trusting it. If nothing matches we return None and
-    the caller falls back to the email/phone-only lookup — never wrong-person data."""
+    Uses person_role_search's ``person_linkedin_public_identifiers`` filter (confirmed
+    by probing the live API; the plain ``linkedin_public_identifiers`` is ignored and
+    returns an arbitrary person). We still VALIDATE the returned person's slug matches
+    before trusting it, and return None on no match so the caller falls back to the
+    email/phone-only lookup — never wrong-person data."""
     if not linkedin_identifier:
         return None
     want = linkedin_identifier.lower().strip()
-    for payload in (
-        {"page": 0, "linkedin_public_identifiers": [linkedin_identifier], "role_is_current": True},
-        {"page": 0, "linkedin_public_identifier": linkedin_identifier},
-        {"page": 0, "person_linkedin_public_identifiers": [linkedin_identifier]},
-    ):
-        try:
-            data = _post("datastorage/person_role_search/", payload)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("person_role_search by linkedin (%s) failed: %s", linkedin_identifier, exc)
-            continue
-        for role in (data or {}).get("search_results", []):
-            if _role_person_slug(role) == want:
-                return role
+    try:
+        data = _post("datastorage/person_role_search/",
+                     {"page": 0, "person_linkedin_public_identifiers": [linkedin_identifier]})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("person_role_search by linkedin (%s) failed: %s", linkedin_identifier, exc)
+        return None
+    for role in (data or {}).get("search_results", []):
+        if _role_person_slug(role) == want:
+            return role
     return None
 
 

@@ -49,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.13 (validate LinkedIn-person match; probe for correct profile-by-linkedin call)"
+BUILD = "v3.14 (profile-by-LinkedIn works: person_linkedin_public_identifiers, validated)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
