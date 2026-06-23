@@ -341,3 +341,19 @@ def score_company(name: str, fields: dict) -> dict:
     out["status"] = "scored"
     out["provider"] = provider
     return out
+
+
+def icp_only(fields: dict) -> dict:
+    """Run ONLY the ICP score (no web search) — fast, for a synchronous key/health
+    check. Returns {"status": "ok", "provider", "icp"} on success, else
+    {"status": "skipped"|"error", ...}. Not used by the real pipeline."""
+    provider = _resolve_provider()
+    if not provider:
+        return {"status": "skipped", "reason": "no ANTHROPIC_API_KEY configured"}
+    try:
+        make_client, icp_fn, _logo_fn = _BACKENDS[provider]
+        client = make_client()
+        icp = _retry(lambda: icp_fn(client, fields or {}))
+        return {"status": "ok", "provider": provider, "icp": icp}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "error", "provider": provider, "error": str(exc)}

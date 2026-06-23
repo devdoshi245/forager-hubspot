@@ -48,7 +48,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.9 (manual contact enrichment: LinkedIn or name+company -> full Forager fields)"
+BUILD = "v3.10 (fast ICP-only Claude self-test)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
@@ -174,22 +174,17 @@ def alert_test():
 @app.route("/debug/score-test", methods=["GET", "POST"])
 @require_secret
 def score_test():
-    """Run scoring on a sample company and return the raw result + any error, so a
-    blank ICP/logo is self-diagnosing. Uses the LLM account only (no Forager credits).
-    May take ~30-60s because the logo step does a live web search."""
+    """Fast Claude key/health check: runs ONLY the ICP prompt (no web search), so it
+    returns in a few seconds. A 401 here means a bad key; real JSON means the key
+    works. The logo step is skipped on purpose — its live web search is too slow for
+    a synchronous request, but runs fine on the background worker during real
+    enrichment. No Forager credits (LLM account only)."""
     sample = {
         "name": "Stripe", "domain": "stripe.com",
         "description": "Payments infrastructure and financial APIs for internet businesses.",
         "industry": "Financial Services", "numberofemployees": 8000,
     }
-    result = scoring.score_company("Stripe", sample)
-    return jsonify({
-        "provider": scoring.provider(),
-        "status": result.get("status"),
-        "reason": result.get("reason"),
-        "icp": result.get("icp"),
-        "logo": result.get("logo"),
-    }), 200
+    return jsonify(scoring.icp_only(sample)), 200
 
 
 # ---------------------------------------------------------------------------
