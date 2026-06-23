@@ -36,6 +36,36 @@ def _company_linkedin_slug(url: str) -> str | None:
     return None
 
 
+def _find_person_role(slug: str | None, firstname: str, lastname: str,
+                      company_name: str, max_pages: int = 5) -> dict | None:
+    """Find a person's Forager role record (full profile) by resolving their company
+    and matching them among its current people — by LinkedIn slug when we have one,
+    otherwise by first+last name. Returns the role dict, or None if not found.
+
+    Needs a company to scope the people search; name-matching is best-effort."""
+    if not company_name:
+        return None
+    org = forager.search_organization(name=company_name)
+    domain = (org or {}).get("domain")
+    if not domain:
+        return None
+    want_slug = (slug or "").lower()
+    want_name = f"{firstname} {lastname}".strip().lower()
+    for page in range(max_pages):
+        roles = forager.find_contacts_at_company(domain, page=page)
+        if not roles:
+            break
+        for role in roles:
+            person = role.get("person") or {}
+            p_slug = ((person.get("linkedin_info") or {}).get("public_identifier") or "").lower()
+            p_name = f"{person.get('first_name', '')} {person.get('last_name', '')}".strip().lower()
+            if want_slug and p_slug and p_slug == want_slug:
+                return role
+            if want_name and p_name and p_name == want_name:
+                return role
+    return None
+
+
 def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
     """Fetch a company from HubSpot, find it in Forager, write enriched fields back.
 
@@ -97,7 +127,8 @@ def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
 
 
 def enrich_contact(hubspot_contact_id: str) -> dict:
-    """Use a contact's LinkedIn URL to look up emails/phones in Forager."""
+    """Enrich a single contact (manual add or company-discovered): pull the full
+    Forager field set via the person's LinkedIn URL, or first+last name + company."""
     hubspot.ensure_custom_properties()
     contact = hubspot.get_contact(hubspot_contact_id)
     if not contact:
@@ -118,32 +149,58 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
         }
 
     slug = _linkedin_slug(props.get("linkedin_url") or "")
-    if not slug:
+    firstname = (props.get("firstname") or "").strip()
+    lastname = (props.get("lastname") or "").strip()
+    company_name = (props.get("company") or "").strip()
+
+    # Resolve the person's full Forager profile so we can fill ALL the fields
+    # (job title, location, company links, personal email -> Email Home, phone),
+    # not just email/phone. We match them among their company's people by LinkedIn
+    # slug when we have one, else by first+last name.
+    role = _find_person_role(slug, firstname, lastname, company_name)
+    if role:
+        person = role.get("person") or {}
+        person_id = person.get("id")
+        person_slug = slug or (person.get("linkedin_info") or {}).get("public_identifier")
+        emails = forager.get_person_emails(person_id=person_id, linkedin_identifier=person_slug)
+        phones = forager.get_person_phones(person_id=person_id, linkedin_identifier=person_slug)
+        fields = forager.parse_person_fields(role, emails, phones)
+        hubspot.update_contact(hubspot_contact_id, fields)
         return {
             "hubspot_contact_id": hubspot_contact_id,
-            "status": "skipped",
-            "reason": "no linkedin_url on contact (required to enrich)",
+            "status": "enriched",
+            "matched_by": "linkedin" if slug else "name+company",
+            "email_home": fields.get("email_home"),
+            "phone": fields.get("phone"),
+            "title": fields.get("jobtitle"),
         }
 
-    emails = forager.get_person_emails(linkedin_identifier=slug)
-    phones = forager.get_person_phones(linkedin_identifier=slug)
-
-    update: dict = {}
-    if emails:
-        update["email_home"] = emails[0]
-        update["all_emails"] = ", ".join(emails)
-    if phones:
-        update["phone"] = phones[0]
-        update["all_phones"] = ", ".join(phones)
-    if update:
-        hubspot.update_contact(hubspot_contact_id, update)
+    # No resolvable company for the full profile — but if we have a LinkedIn URL,
+    # still pull the personal email + phone directly by slug.
+    if slug:
+        emails = forager.get_person_emails(linkedin_identifier=slug)
+        phones = forager.get_person_phones(linkedin_identifier=slug)
+        update: dict = {}
+        if emails:
+            update["email_home"] = emails[0]
+            update["all_emails"] = ", ".join(emails)
+        if phones:
+            update["phone"] = phones[0]
+            update["all_phones"] = ", ".join(phones)
+        if update:
+            hubspot.update_contact(hubspot_contact_id, update)
+        return {
+            "hubspot_contact_id": hubspot_contact_id,
+            "status": "enriched" if update else "no_data_found",
+            "matched_by": "linkedin (email/phone only — add a Company for full enrichment)",
+            "emails_found": emails,
+            "phones_found": phones,
+        }
 
     return {
         "hubspot_contact_id": hubspot_contact_id,
-        "linkedin_slug": slug,
-        "emails_found": emails,
-        "phones_found": phones,
-        "status": "enriched" if (emails or phones) else "no_data_found",
+        "status": "skipped",
+        "reason": "need a LinkedIn URL, or first+last name + company, to enrich",
     }
 
 

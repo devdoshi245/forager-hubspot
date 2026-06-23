@@ -48,7 +48,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.8 (Funding company field added; manual-contact enrichment + Deepline next)"
+BUILD = "v3.9 (manual contact enrichment: LinkedIn or name+company -> full Forager fields)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
