@@ -48,7 +48,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.3 (Claude-only scoring; title-match contacts; Email Home + company state)"
+BUILD = "v3.4 (create only missing custom properties - no 409 log noise)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 

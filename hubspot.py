@@ -153,9 +153,27 @@ def ensure_custom_properties() -> None:
     _ensured = True
 
 
+def _existing_property_names(object_type: str) -> set[str]:
+    """Names of properties that already exist on this object, so we create only the
+    missing ones — this avoids the noisy (harmless) 409 'already exists' calls."""
+    try:
+        resp = _SESSION.get(
+            f"{HUBSPOT_BASE}/crm/v3/properties/{object_type}",
+            headers=_headers(), timeout=30,
+        )
+        resp.raise_for_status()
+        return {p.get("name") for p in resp.json().get("results", []) if p.get("name")}
+    except Exception as exc:  # noqa: BLE001 - fall back to create-and-tolerate-409
+        logger.warning("Could not list %s properties: %s", object_type, exc)
+        return set()
+
+
 def _create_properties(object_type: str, group: str, props: list[tuple]) -> None:
+    existing = _existing_property_names(object_type)
     for entry in props:
         name, label = entry[0], entry[1]
+        if name in existing:
+            continue  # already present — skip the POST (no 409)
         prop_type = entry[2] if len(entry) > 2 else "string"
         field_type = "number" if prop_type == "number" else "text"
         body = {
@@ -173,7 +191,7 @@ def _create_properties(object_type: str, group: str, props: list[tuple]) -> None
             if resp.status_code in (200, 201):
                 logger.info("Created %s property '%s'", object_type, name)
             elif resp.status_code == 409:
-                pass  # already exists
+                pass  # already exists (created between our list call and this POST)
             else:
                 logger.warning(
                     "Create property %s/%s -> %s: %s",
