@@ -172,7 +172,12 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
     # (job title, location, company links, personal email -> Email Home, phone),
     # not just email/phone. We match them among their company's people by LinkedIn
     # slug when we have one, else by first+last name.
-    role = _find_person_role(slug, firstname, lastname, company_name)
+    # Most precise route first: a direct LinkedIn -> profile lookup (no company
+    # needed). If that comes back empty, fall back to the company route (resolve
+    # the company, match the person by name/slug among its people).
+    role = forager.find_person_by_linkedin(slug) if slug else None
+    if not role:
+        role = _find_person_role(slug, firstname, lastname, company_name)
     if role:
         person = role.get("person") or {}
         person_id = person.get("id")

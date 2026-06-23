@@ -254,6 +254,29 @@ def find_contacts_at_company(
     return (data or {}).get("search_results", [])
 
 
+def find_person_by_linkedin(linkedin_identifier: str) -> dict | None:
+    """Look up one person's role record (full profile: name, title, location,
+    organization) DIRECTLY by their LinkedIn public identifier — no company needed.
+    person_role_search takes the same ``linkedin_public_identifiers`` filter as the
+    organization search. Returns the first/current role record, or None (in which
+    case the caller falls back to the email/phone-only lookup — no regression)."""
+    if not linkedin_identifier:
+        return None
+    for payload in (
+        {"page": 0, "linkedin_public_identifiers": [linkedin_identifier], "role_is_current": True},
+        {"page": 0, "linkedin_public_identifiers": [linkedin_identifier]},
+    ):
+        try:
+            data = _post("datastorage/person_role_search/", payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("person_role_search by linkedin (%s) failed: %s", linkedin_identifier, exc)
+            continue
+        results = (data or {}).get("search_results", [])
+        if results:
+            return results[0]
+    return None
+
+
 # ---------------------------------------------------------------------------
 # CONTACT ENRICHMENT (emails + phones)
 # These endpoints return a bare JSON array. Accepts {"person_id": int} or

@@ -39,6 +39,7 @@ import alerts       # noqa: E402  (import after load_dotenv so env vars are set)
 import auth         # noqa: E402
 import background   # noqa: E402
 import enrichment   # noqa: E402
+import forager      # noqa: E402
 import hubspot      # noqa: E402
 import scoring      # noqa: E402
 
@@ -48,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.11 (read contact LinkedIn from built-in 'LinkedIn URL' field too)"
+BUILD = "v3.12 (full profile from LinkedIn URL alone + /debug/person-test)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
@@ -185,6 +186,31 @@ def score_test():
         "industry": "Financial Services", "numberofemployees": 8000,
     }
     return jsonify(scoring.icp_only(sample)), 200
+
+
+@app.route("/debug/person-test", methods=["GET", "POST"])
+@require_secret
+def person_test():
+    """Diagnostic: does Forager return a person's full profile from a LinkedIn handle
+    ALONE (no company)? Pass ?slug=<linkedin-handle>. It's a search, not a reveal, so
+    ~0 Forager credits. 'found': true with a title/company means the LinkedIn-only
+    full-profile path works."""
+    slug = request.args.get("slug") or "ankurbansal177"
+    role = forager.find_person_by_linkedin(slug)
+    if not role:
+        return jsonify({"slug": slug, "found": False,
+                        "note": "no role returned for this LinkedIn handle"}), 200
+    person = role.get("person") or {}
+    org = role.get("organization") or {}
+    return jsonify({
+        "slug": slug, "found": True,
+        "name": f"{person.get('first_name', '')} {person.get('last_name', '')}".strip(),
+        "title": role.get("role_title"),
+        "company": org.get("name"),
+        "company_domain": org.get("domain"),
+        "has_location": bool(person.get("location")),
+        "linkedin": (person.get("linkedin_info") or {}).get("public_profile_url"),
+    }), 200
 
 
 # ---------------------------------------------------------------------------
