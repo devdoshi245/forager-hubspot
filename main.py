@@ -49,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.12 (full profile from LinkedIn URL alone + /debug/person-test)"
+BUILD = "v3.13 (validate LinkedIn-person match; probe for correct profile-by-linkedin call)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
@@ -196,21 +196,7 @@ def person_test():
     ~0 Forager credits. 'found': true with a title/company means the LinkedIn-only
     full-profile path works."""
     slug = request.args.get("slug") or "ankurbansal177"
-    role = forager.find_person_by_linkedin(slug)
-    if not role:
-        return jsonify({"slug": slug, "found": False,
-                        "note": "no role returned for this LinkedIn handle"}), 200
-    person = role.get("person") or {}
-    org = role.get("organization") or {}
-    return jsonify({
-        "slug": slug, "found": True,
-        "name": f"{person.get('first_name', '')} {person.get('last_name', '')}".strip(),
-        "title": role.get("role_title"),
-        "company": org.get("name"),
-        "company_domain": org.get("domain"),
-        "has_location": bool(person.get("location")),
-        "linkedin": (person.get("linkedin_info") or {}).get("public_profile_url"),
-    }), 200
+    return jsonify(forager.probe_person_by_linkedin(slug)), 200
 
 
 # ---------------------------------------------------------------------------

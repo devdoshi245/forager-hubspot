@@ -254,27 +254,71 @@ def find_contacts_at_company(
     return (data or {}).get("search_results", [])
 
 
+def _role_person_slug(role: dict) -> str:
+    return (((role.get("person") or {}).get("linkedin_info") or {}).get("public_identifier") or "").lower()
+
+
 def find_person_by_linkedin(linkedin_identifier: str) -> dict | None:
-    """Look up one person's role record (full profile: name, title, location,
-    organization) DIRECTLY by their LinkedIn public identifier — no company needed.
-    person_role_search takes the same ``linkedin_public_identifiers`` filter as the
-    organization search. Returns the first/current role record, or None (in which
-    case the caller falls back to the email/phone-only lookup — no regression)."""
+    """Look up one person's role record (full profile) DIRECTLY by LinkedIn id.
+
+    CRITICAL: person_role_search silently ignores a filter it doesn't recognise and
+    returns an ARBITRARY person, so we VALIDATE that the returned person's LinkedIn
+    slug actually matches before trusting it. If nothing matches we return None and
+    the caller falls back to the email/phone-only lookup — never wrong-person data."""
     if not linkedin_identifier:
         return None
+    want = linkedin_identifier.lower().strip()
     for payload in (
         {"page": 0, "linkedin_public_identifiers": [linkedin_identifier], "role_is_current": True},
-        {"page": 0, "linkedin_public_identifiers": [linkedin_identifier]},
+        {"page": 0, "linkedin_public_identifier": linkedin_identifier},
+        {"page": 0, "person_linkedin_public_identifiers": [linkedin_identifier]},
     ):
         try:
             data = _post("datastorage/person_role_search/", payload)
         except Exception as exc:  # noqa: BLE001
             logger.warning("person_role_search by linkedin (%s) failed: %s", linkedin_identifier, exc)
             continue
-        results = (data or {}).get("search_results", [])
-        if results:
-            return results[0]
+        for role in (data or {}).get("search_results", []):
+            if _role_person_slug(role) == want:
+                return role
     return None
+
+
+def probe_person_by_linkedin(linkedin_identifier: str) -> dict:
+    """Diagnostic only (/debug/person-test): try several Forager calls to fetch a
+    person by LinkedIn id and report which — if any — returns the MATCHING person."""
+    want = (linkedin_identifier or "").lower().strip()
+    attempts = [
+        ("person_role_search: linkedin_public_identifiers", "datastorage/person_role_search/",
+         {"page": 0, "linkedin_public_identifiers": [linkedin_identifier]}),
+        ("person_role_search: linkedin_public_identifier", "datastorage/person_role_search/",
+         {"page": 0, "linkedin_public_identifier": linkedin_identifier}),
+        ("person_role_search: person_linkedin_public_identifiers", "datastorage/person_role_search/",
+         {"page": 0, "person_linkedin_public_identifiers": [linkedin_identifier]}),
+        ("person_search: linkedin_public_identifiers", "datastorage/person_search/",
+         {"page": 0, "linkedin_public_identifiers": [linkedin_identifier]}),
+        ("person_search: linkedin_public_identifier", "datastorage/person_search/",
+         {"page": 0, "linkedin_public_identifier": linkedin_identifier}),
+    ]
+    report = []
+    for name, path, payload in attempts:
+        item = {"attempt": name}
+        try:
+            data = _post(path, payload)
+        except Exception as exc:  # noqa: BLE001
+            item["error"] = str(exc)[:140]
+            report.append(item)
+            continue
+        results = data if isinstance(data, list) else (data or {}).get("search_results", [])
+        item["count"] = len(results) if isinstance(results, list) else "?"
+        match = next((r for r in (results if isinstance(results, list) else [])
+                      if isinstance(r, dict) and _role_person_slug(r) == want), None)
+        item["matched"] = bool(match)
+        if match:
+            item["title"] = match.get("role_title")
+            item["company"] = (match.get("organization") or {}).get("name")
+        report.append(item)
+    return {"slug": linkedin_identifier, "attempts": report}
 
 
 # ---------------------------------------------------------------------------
