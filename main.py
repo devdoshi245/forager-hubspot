@@ -49,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.18 (split workflows: company discovers -> contact enriches; max_contacts=50; personal email -> migrated_emails_home; duplicate-person credit guard)"
+BUILD = "v3.19 (discovery scans up to 100 pages + logs a diagnostic: total people / scanned / matched / stop reason)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 

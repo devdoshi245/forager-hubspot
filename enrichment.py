@@ -262,25 +262,35 @@ def discover_and_create_contacts(
     owner_id = hubspot.auto_create_owner_id()
 
     page = 0
-    # Discovery is free (search-only), so scan deep enough to fill a large
-    # max_contacts even when buyer-committee titles are sparse on early pages.
-    MAX_PAGES = 30
+    # Discovery is free (search-only) and the loop auto-stops when Forager runs
+    # out of people, so scan deep: a high cap only matters for huge companies
+    # where qualifying titles are spread across many pages.
+    MAX_PAGES = 100
+    # Diagnostics so we can always tell WHY a company returned few contacts:
+    # did we run out of Forager people, or hit the page cap with more remaining?
+    people_scanned = 0
+    matches_found = 0
+    total_available: int | None = None
+    stop_reason = "reached max_contacts (cap filled)"
     while needed > 0 and page < MAX_PAGES:
         # Fetch the broad set of current people (no Forager-side title filter) so
         # we can apply the full buyer-committee list locally.
-        roles = forager.find_contacts_at_company(
-            company_domain, job_title_filter=None, page=page
-        )
+        roles, total = forager.find_contacts_at_company_with_total(company_domain, page=page)
+        if total is not None:
+            total_available = total
         page += 1
         if not roles:
+            stop_reason = "ran out of people (Forager returned no more)"
             break
         for role in roles:
             if needed <= 0:
                 break
+            people_scanned += 1
             role_title = role.get("role_title") or ""
             # Title gate (free, local): only buyer-committee titles are created.
             if not buyer_committee.matches_buyer_committee(role_title):
                 continue
+            matches_found += 1
             if job_title_filter and job_title_filter.lower() not in role_title.lower():
                 continue
             person = role.get("person") or {}
@@ -322,6 +332,29 @@ def discover_and_create_contacts(
                 "title": fields.get("jobtitle"),
                 "action": action,
             })
+
+    # If the loop ended because we exhausted MAX_PAGES (not an empty page and not
+    # a filled cap), say so — that's the signal to raise MAX_PAGES.
+    if needed > 0 and page >= MAX_PAGES:
+        stop_reason = f"hit page cap ({MAX_PAGES}) — more people likely remain; raise MAX_PAGES"
+
+    created_count = sum(1 for r in results if r.get("contact_id"))
+    diagnostic = {
+        "domain": company_domain,
+        "forager_total_people": total_available,
+        "people_scanned": people_scanned,
+        "pages_scanned": page,
+        "buyer_committee_matches": matches_found,
+        "contacts_created_or_linked": created_count,
+        "max_contacts": max_contacts,
+        "stop_reason": stop_reason,
+    }
+    logger.info(
+        "Discovery %s: total_people=%s scanned=%d pages=%d matched=%d created=%d cap=%d stop=%r",
+        company_domain, total_available, people_scanned, page, matches_found,
+        created_count, max_contacts, stop_reason,
+    )
+    results.append({"diagnostic": diagnostic})
     return results
 
 

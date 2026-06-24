@@ -254,6 +254,19 @@ def find_contacts_at_company(
     return (data or {}).get("search_results", [])
 
 
+def find_contacts_at_company_with_total(organization_domain: str, page: int = 0) -> tuple[list[dict], int | None]:
+    """Like find_contacts_at_company, but also returns Forager's TOTAL count of
+    current people it has for the domain (``total_search_results``). Used by the
+    discovery diagnostic so we can tell 'ran out of people' from 'hit the page cap'."""
+    payload = {
+        "page": page,
+        "organization_domains": [organization_domain],
+        "role_is_current": True,
+    }
+    data = _post("datastorage/person_role_search/", payload)
+    return (data or {}).get("search_results", []), (data or {}).get("total_search_results")
+
+
 def _role_person_slug(role: dict) -> str:
     return (((role.get("person") or {}).get("linkedin_info") or {}).get("public_identifier") or "").lower()
 
