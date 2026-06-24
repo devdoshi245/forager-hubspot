@@ -49,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.20 (discovery scans up to 300 pages; logs discovery_credits=0 + est_reveal_credits forecast; per-contact reveal credit estimate)"
+BUILD = "v3.21 (fix: validate LinkedIn-URL company match so it never returns the wrong company's contacts)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 

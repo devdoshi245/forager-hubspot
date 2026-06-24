@@ -91,6 +91,20 @@ def _org_score(org: dict) -> tuple:
     return (rank_key, -employees)
 
 
+def _org_linkedin_slug(org: dict) -> str:
+    """The company's own LinkedIn handle, lower-cased — from linkedin_info's
+    public_identifier, or parsed from its public_profile_url (.../company/<slug>)."""
+    li = org.get("linkedin_info") or {}
+    slug = (li.get("public_identifier") or "").strip().lower()
+    if slug:
+        return slug
+    # Fall back to the profile URL, cleaning LinkedIn's "duplicate__<id>_<slug>" form first.
+    url = _clean_linkedin_url(li.get("public_profile_url") or "").lower()
+    if "linkedin.com/company/" in url:
+        return url.rstrip("/").split("/company/")[-1].split("?")[0].split("/")[0]
+    return ""
+
+
 def search_organization(
     domain: str | None = None,
     name: str | None = None,
@@ -110,15 +124,20 @@ def search_organization(
                                  name match, as a last resort.
     Returns the chosen org dict, or None.
     """
-    # 1) LinkedIn identifier — most precise.
+    # 1) LinkedIn identifier — most precise, BUT only when the returned company's
+    #    own handle actually matches what we asked for. Forager's org search can
+    #    return an unrelated company first (e.g. a different bank), so trusting
+    #    results[0] blindly produced wrong-company contacts. Validate the slug;
+    #    if nothing matches, fall through to domain/name instead of guessing.
     if linkedin_identifier:
+        want = linkedin_identifier.strip().lower()
         data = _post(
             "datastorage/organization_search/",
             {"page": 0, "linkedin_public_identifiers": [linkedin_identifier]},
         )
-        results = (data or {}).get("search_results", [])
-        if results:
-            return results[0]
+        for org in (data or {}).get("search_results", []):
+            if _org_linkedin_slug(org) == want:
+                return org
 
     # 2) Domain — the plain domain search is extremely noisy: a search for
     #    openai.com returns 37 unrelated projects (Wordwise, ChatGPT, SORA AI...)
