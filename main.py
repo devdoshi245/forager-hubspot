@@ -49,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.21 (fix: validate LinkedIn-URL company match so it never returns the wrong company's contacts)"
+BUILD = "v3.22 (fix: LinkedIn-URL match is strict + normalized; no fuzzy name fallback when a LinkedIn URL is given -> never the wrong company)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 

@@ -91,6 +91,13 @@ def _org_score(org: dict) -> tuple:
     return (rank_key, -employees)
 
 
+def _norm_slug(value: str | None) -> str:
+    """Normalize a LinkedIn handle for comparison: lower-case and drop everything
+    that isn't a letter or digit, so 'IndusInd-Bank', 'indusind_bank' and
+    'indusindbank' all compare equal."""
+    return re.sub(r"[^a-z0-9]", "", (value or "").lower())
+
+
 def _org_linkedin_slug(org: dict) -> str:
     """The company's own LinkedIn handle, lower-cased — from linkedin_info's
     public_identifier, or parsed from its public_profile_url (.../company/<slug>)."""
@@ -127,16 +134,20 @@ def search_organization(
     # 1) LinkedIn identifier — most precise, BUT only when the returned company's
     #    own handle actually matches what we asked for. Forager's org search can
     #    return an unrelated company first (e.g. a different bank), so trusting
-    #    results[0] blindly produced wrong-company contacts. Validate the slug;
-    #    if nothing matches, fall through to domain/name instead of guessing.
+    #    results[0] blindly produced wrong-company contacts. Validate the slug
+    #    (normalized, so 'IndusInd-Bank' == 'indusindbank'); only an exact match
+    #    is trusted. When a LinkedIn URL is given we do NOT fall back to the fuzzy
+    #    name search below (that matched a junk 'bank.in' org named "IndusInd
+    #    Bank"); a wrong company is worse than no match — the user can add the
+    #    website to resolve it reliably via the domain path.
     if linkedin_identifier:
-        want = linkedin_identifier.strip().lower()
+        want = _norm_slug(linkedin_identifier)
         data = _post(
             "datastorage/organization_search/",
             {"page": 0, "linkedin_public_identifiers": [linkedin_identifier]},
         )
         for org in (data or {}).get("search_results", []):
-            if _org_linkedin_slug(org) == want:
+            if want and _norm_slug(_org_linkedin_slug(org)) == want:
                 return org
 
     # 2) Domain — the plain domain search is extremely noisy: a search for
@@ -171,8 +182,11 @@ def search_organization(
         if exact:
             return sorted(exact, key=_org_score)[0]
 
-    # 3) Name — fuzzy; require an exact name match to avoid garbage.
-    if name:
+    # 3) Name — fuzzy; require an exact name match to avoid garbage. SKIPPED when a
+    #    LinkedIn URL was given: the user handed us a precise identifier, so a name
+    #    match that disagrees with it is exactly the wrong-company case (e.g. a junk
+    #    'bank.in' org named "IndusInd Bank"). Better to return None.
+    if name and not linkedin_identifier:
         data = _post("datastorage/organization_search/", {"page": 0, "description": name})
         for org in (data or {}).get("search_results", []):
             if (org.get("name") or "").strip().lower() == name.strip().lower():
