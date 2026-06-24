@@ -223,6 +223,10 @@ def find_and_create_contacts(
         return [{"status": "skipped",
                  "reason": f"company already has {already} enriched contact(s); max is {max_contacts}"}]
 
+    # Auto-created contacts are assigned to the configured Contact Owner
+    # (CONTACT_OWNER env var, e.g. "OneGTM Labs") so they don't land unassigned.
+    owner_id = hubspot.auto_create_owner_id()
+
     # Scan candidates until we've created `needed` email-having contacts. Bound the
     # scan (candidate_budget / MAX_PAGES) so a low email hit-rate can't run away
     # with credits — each email lookup costs Forager credits.
@@ -268,6 +272,8 @@ def find_and_create_contacts(
             emails = forager.get_person_emails(person_id=person_id, linkedin_identifier=slug)
             phones = forager.get_person_phones(person_id=person_id, linkedin_identifier=slug)
             fields = forager.parse_person_fields(role, emails, phones)
+            if owner_id:
+                fields["hubspot_owner_id"] = owner_id
 
             existing = hubspot.find_contact_by_email_home(fields["email_home"])
             if existing:

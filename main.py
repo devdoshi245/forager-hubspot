@@ -49,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.16 (manual contact enrichment is LinkedIn-URL only; name+company removed)"
+BUILD = "v3.17 (auto-created contacts assigned to CONTACT_OWNER)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
@@ -186,6 +186,18 @@ def score_test():
         "industry": "Financial Services", "numberofemployees": 8000,
     }
     return jsonify(scoring.icp_only(sample)), 200
+
+
+@app.route("/debug/owners", methods=["GET"])
+@require_secret
+def debug_owners():
+    """List HubSpot owners (id, email, name) and show what CONTACT_OWNER resolves to —
+    use it to find/verify the value for the auto-created Contact Owner."""
+    return jsonify({
+        "configured_contact_owner": hubspot.CONTACT_OWNER,
+        "resolved_owner_id": hubspot.auto_create_owner_id(),
+        "owners": hubspot.list_owners(),
+    }), 200
 
 
 @app.route("/debug/person-test", methods=["GET", "POST"])

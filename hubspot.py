@@ -28,6 +28,9 @@ _SESSION = httpclient.make_session()
 
 HUBSPOT_BASE = "https://api.hubapi.com"
 HUBSPOT_TOKEN = os.environ.get("HUBSPOT_TOKEN")
+# Owner assigned to auto-created contacts. Accepts an owner id, an email, or a
+# display name (e.g. "OneGTM Labs"); resolved to an owner id at runtime.
+CONTACT_OWNER = os.environ.get("CONTACT_OWNER")
 
 # Custom properties we create on first use: (name, human label[, type]).
 # type is "string" (free text, default) or "number".
@@ -322,3 +325,65 @@ def associate_contact_to_company(contact_id: str, company_id: str) -> None:
         headers=_headers(), timeout=30,
     )
     resp.raise_for_status()
+
+
+# ---------------------------------------------------------------------------
+# Owners (Contact Owner for auto-created contacts)
+# ---------------------------------------------------------------------------
+_owner_cache: dict = {}
+
+
+def list_owners() -> list[dict]:
+    """List HubSpot owners as {id, email, name} — used to resolve/verify CONTACT_OWNER."""
+    owners: list[dict] = []
+    after = None
+    for _ in range(20):
+        params = {"limit": 100}
+        if after:
+            params["after"] = after
+        resp = _SESSION.get(f"{HUBSPOT_BASE}/crm/v3/owners", headers=_headers(), params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        for o in data.get("results", []):
+            owners.append({"id": o.get("id"), "email": o.get("email"),
+                           "name": f"{o.get('firstName', '')} {o.get('lastName', '')}".strip()})
+        after = ((data.get("paging") or {}).get("next") or {}).get("after")
+        if not after:
+            break
+    return owners
+
+
+def resolve_owner_id(value: str | None) -> str | None:
+    """Resolve a HubSpot owner id from an owner id, email, or display name (cached)."""
+    if not value:
+        return None
+    value = value.strip()
+    if value in _owner_cache:
+        return _owner_cache[value]
+    owner_id = None
+    try:
+        if value.isdigit():
+            owner_id = value  # already an owner id
+        elif "@" in value:
+            resp = _SESSION.get(f"{HUBSPOT_BASE}/crm/v3/owners", headers=_headers(),
+                                params={"email": value, "limit": 1}, timeout=30)
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
+            owner_id = results[0]["id"] if results else None
+        else:
+            want = value.lower()
+            for owner in list_owners():
+                if (owner["name"] or "").lower() == want or (owner["email"] or "").lower() == want:
+                    owner_id = owner["id"]
+                    break
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("resolve_owner_id(%r) failed: %s", value, exc)
+    if owner_id is None:
+        logger.warning("No HubSpot owner matched CONTACT_OWNER=%r", value)
+    _owner_cache[value] = owner_id
+    return owner_id
+
+
+def auto_create_owner_id() -> str | None:
+    """Owner id for auto-created contacts, from the CONTACT_OWNER env var (or None)."""
+    return resolve_owner_id(CONTACT_OWNER)
