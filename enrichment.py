@@ -3,12 +3,20 @@ enrichment.py
 -------------
 Business logic: orchestrates Forager lookups and HubSpot writes.
 
-Five capabilities:
-  enrich_company           - fill a HubSpot company from Forager
-  enrich_contact           - fill a HubSpot contact's email/phone from Forager
-  find_and_create_contacts - discover people at a company, create + associate
-  handle_company_webhook   - company-created pipeline (enrich + find people)
-  handle_contact_webhook   - contact-created pipeline (enrich the contact)
+Two separate workflows, chained via HubSpot's contact-created webhook:
+  Workflow 1 (company-created):  enrich_company + discover_and_create_contacts
+                                 (discover skeletons only — NO reveal credits)
+  Workflow 2 (contact-created):  enrich_contact (reveal email/phone — credits)
+
+Creating a skeleton in Workflow 1 fires the contact-created webhook, which runs
+Workflow 2 on it. A manually-added contact enters at Workflow 2 directly.
+
+Capabilities:
+  enrich_company             - fill a HubSpot company from Forager
+  discover_and_create_contacts - discover people at a company, create skeletons
+  enrich_contact             - reveal a contact's email/phone from Forager
+  handle_company_webhook     - Workflow 1 pipeline
+  handle_contact_webhook     - Workflow 2 pipeline
 """
 
 import logging
@@ -91,6 +99,13 @@ def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
 
     fields = forager.parse_company_fields(org)
 
+    # Never overwrite values the user typed in by hand: Company Name, Website, and
+    # the LinkedIn company page are only filled when the HubSpot field is empty.
+    # (Everything else — revenue, headcount, location, etc. — still updates.)
+    for key in ("name", "website", "linkedin_company_page"):
+        if (props.get(key) or "").strip():
+            fields.pop(key, None)
+
     # Score the company in parallel to enrichment (diagram: ICP fit + logo
     # recognizability via Claude). Skips gracefully if scoring isn't configured,
     # and never blocks the Forager write-back on a scoring failure.
@@ -112,8 +127,19 @@ def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
 
 
 def enrich_contact(hubspot_contact_id: str) -> dict:
-    """Enrich a single contact (manual add or company-discovered): pull the full
-    Forager field set via the person's LinkedIn URL."""
+    """Workflow 2 — enrich ONE contact (the credit-spending step).
+
+    Runs for every contact-created event: contacts the company workflow just
+    DISCOVERED (skeletons that already carry a forager_person_id + LinkedIn URL but
+    no revealed email/phone) and contacts a user adds by hand (LinkedIn URL only).
+
+    Credit safety:
+      * `forager_enriched` guard — a record we've already revealed is skipped, so a
+        re-delivered webhook (or a contact.propertyChange ping) never re-spends.
+      * duplicate-person guard — before any reveal we do a FREE HubSpot search; if
+        the same Forager person is already enriched on another record, we skip the
+        reveal entirely (no credits) instead of paying for the same person twice.
+    """
     hubspot.ensure_custom_properties()
     contact = hubspot.get_contact(hubspot_contact_id)
     if not contact:
@@ -121,93 +147,101 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
 
     props = contact.get("properties", {})
 
-    # Idempotency guard: contacts our pipeline created/enriched carry a Forager
-    # person id. Both webhooks (company-created and contact-created) are active,
-    # so without this the contact-created webhook would re-enrich every contact
-    # the company pipeline just created (each already has a LinkedIn URL),
-    # doubling Forager credit spend. Skip anything already stamped by us.
-    if (props.get("forager_person_id") or "").strip():
+    # (1) Already revealed? Nothing to do, no credits.
+    if (props.get("forager_enriched") or "").strip().lower() == "true":
         return {
             "hubspot_contact_id": hubspot_contact_id,
             "status": "skipped",
-            "reason": "already enriched (forager_person_id present)",
+            "reason": "already enriched (forager_enriched=true)",
         }
 
+    person_id = (props.get("forager_person_id") or "").strip() or None
     slug = _contact_linkedin_slug(props)
 
-    # Manual contacts enrich from their LinkedIn URL only — a direct, reliable person
-    # lookup. (Forager has no person-by-name search, so name+company can't reliably
-    # pin a specific person; the LinkedIn URL is the dependable key.)
-    role = forager.find_person_by_linkedin(slug) if slug else None
+    # (2) Resolve the person. Discovered skeletons already carry the person_id (set
+    # for free at discovery), so no lookup is needed — we only need to reveal their
+    # email/phone. A manual contact has only a LinkedIn URL, so resolve the full
+    # profile from it first (a search — ~0 Forager credits).
+    role = None
+    if not person_id:
+        if not slug:
+            return {
+                "hubspot_contact_id": hubspot_contact_id,
+                "status": "skipped",
+                "reason": "need a LinkedIn URL (or a Forager person id) to enrich the contact",
+            }
+        role = forager.find_person_by_linkedin(slug)
+        if role:
+            person = role.get("person") or {}
+            person_id = str(person.get("id")) if person.get("id") else None
+            slug = slug or (person.get("linkedin_info") or {}).get("public_identifier")
+
+    # (3) Duplicate-person guard (FREE HubSpot search — no Forager credits). If this
+    # exact person is already enriched on a different record, don't pay again.
+    if person_id:
+        dup = hubspot.find_enriched_contact_by_person_id(person_id, exclude_id=hubspot_contact_id)
+        if dup:
+            hubspot.update_contact(hubspot_contact_id, {"forager_enriched": "true"})
+            return {
+                "hubspot_contact_id": hubspot_contact_id,
+                "status": "skipped",
+                "reason": f"duplicate of already-enriched contact {dup.get('id')}; no credits spent",
+                "duplicate_of": dup.get("id"),
+            }
+
+    # (4) Reveal email + phone (THIS spends Forager credits).
+    emails = forager.get_person_emails(person_id=person_id, linkedin_identifier=slug)
+    phones = forager.get_person_phones(person_id=person_id, linkedin_identifier=slug)
+
+    # (5) Build the write. A manual contact gets its full profile from `role`; a
+    # discovered skeleton already has its profile, so we only add the revealed
+    # contact details. Either way, stamp forager_enriched so we never re-spend.
     if role:
-        person = role.get("person") or {}
-        person_id = person.get("id")
-        person_slug = slug or (person.get("linkedin_info") or {}).get("public_identifier")
-        emails = forager.get_person_emails(person_id=person_id, linkedin_identifier=person_slug)
-        phones = forager.get_person_phones(person_id=person_id, linkedin_identifier=person_slug)
         fields = forager.parse_person_fields(role, emails, phones)
-        hubspot.update_contact(hubspot_contact_id, fields)
-        return {
-            "hubspot_contact_id": hubspot_contact_id,
-            "status": "enriched",
-            "matched_by": "linkedin",
-            "email_home": fields.get("email_home"),
-            "phone": fields.get("phone"),
-            "title": fields.get("jobtitle"),
-        }
-
-    # No full-profile match (e.g. the person isn't in Forager's role data) — but if
-    # we have a LinkedIn URL, still pull the personal email + phone directly by slug.
-    if slug:
-        emails = forager.get_person_emails(linkedin_identifier=slug)
-        phones = forager.get_person_phones(linkedin_identifier=slug)
-        update: dict = {}
+    else:
+        fields = {}
         if emails:
-            update["email_home"] = emails[0]
-            update["all_emails"] = ", ".join(emails)
+            fields["migrated_emails_home"] = emails[0]
+            fields["all_emails"] = ", ".join(emails)
         if phones:
-            update["phone"] = phones[0]
-            update["all_phones"] = ", ".join(phones)
-        if update:
-            hubspot.update_contact(hubspot_contact_id, update)
-        return {
-            "hubspot_contact_id": hubspot_contact_id,
-            "status": "enriched" if update else "no_data_found",
-            "matched_by": "linkedin (email/phone only; no full-profile match)",
-            "emails_found": emails,
-            "phones_found": phones,
-        }
+            fields["phone"] = phones[0]
+            fields["all_phones"] = ", ".join(phones)
+    fields["forager_enriched"] = "true"
+    if person_id and not (props.get("forager_person_id") or "").strip():
+        fields["forager_person_id"] = person_id
 
+    hubspot.update_contact(hubspot_contact_id, fields)
     return {
         "hubspot_contact_id": hubspot_contact_id,
-        "status": "skipped",
-        "reason": "need a LinkedIn URL to enrich the contact",
+        "status": "enriched",
+        "matched_by": "forager_person_id" if not role else "linkedin",
+        "migrated_emails_home": fields.get("migrated_emails_home"),
+        "phone": fields.get("phone"),
+        "title": fields.get("jobtitle") or props.get("jobtitle"),
     }
 
 
-def find_and_create_contacts(
+def discover_and_create_contacts(
     hubspot_company_id: str,
     company_domain: str,
     job_title_filter: str | None = None,
-    max_contacts: int = 5,
+    max_contacts: int = 50,
 ) -> list[dict]:
-    """Discover people at a company, enrich them, create/update + associate in HubSpot.
+    """Workflow 1's contact step — DISCOVER people at a company and create them as
+    skeleton contacts. This spends NO reveal credits: it only searches (≈free) and
+    writes the profile fields the search already returns (name, title, LinkedIn,
+    company). Each created contact then fires HubSpot's contact-created webhook,
+    which triggers Workflow 2 (``enrich_contact``) to reveal the email/phone.
 
-    Only people whose job title is on the TAM buyer-committee list
-    (``buyer_committee.matches_buyer_committee``) are created — everyone else is
-    skipped *before* any (credit-spending) Forager contact lookup. ``job_title_filter``,
-    if given, is an additional narrowing applied on top of the committee list.
-
-    Of the buyer-committee matches, only people for whom Forager returns an email
-    are created — emailless records can't be de-duplicated, so they're skipped.
-    The function is idempotent: contacts the company already has count toward
-    ``max_contacts``, so a re-delivered webhook neither creates extra rows nor
-    re-spends Forager credits.
+    Only TAM buyer-committee titles (``buyer_committee.matches_buyer_committee``) are
+    created; ``job_title_filter`` narrows further. Idempotent: people already on the
+    company (or already a contact anywhere, by Forager person id) are not duplicated,
+    and existing contacts count toward ``max_contacts``.
     """
     hubspot.ensure_custom_properties()
 
-    # What does the company already have? Count enriched (email-bearing) contacts
-    # and remember their Forager person ids so we never re-process / re-pay for them.
+    # What does the company already have? Count contacts we've stamped (skeleton or
+    # enriched) and remember their Forager person ids so we don't re-create them.
     seen_person_ids: set[str] = set()
     already = 0
     for existing_contact in hubspot.get_contacts_for_company(hubspot_company_id):
@@ -221,24 +255,17 @@ def find_and_create_contacts(
     results: list[dict] = []
     if needed <= 0:
         return [{"status": "skipped",
-                 "reason": f"company already has {already} enriched contact(s); max is {max_contacts}"}]
+                 "reason": f"company already has {already} contact(s); max is {max_contacts}"}]
 
     # Auto-created contacts are assigned to the configured Contact Owner
     # (CONTACT_OWNER env var, e.g. "OneGTM Labs") so they don't land unassigned.
     owner_id = hubspot.auto_create_owner_id()
 
-    # Scan candidates until we've created `needed` email-having contacts. Bound the
-    # scan (candidate_budget / MAX_PAGES) so a low email hit-rate can't run away
-    # with credits — each email lookup costs Forager credits.
-    candidate_budget = needed * 2
-    scanned = 0
     page = 0
-    # Scan deeper: the buyer-committee filter is narrow, so for large / non-SaaS
-    # companies the qualifying titles can be sparse on the first pages. People who
-    # don't match are skipped for free, and credits are still only spent on matches
-    # (up to max_contacts), so a deeper scan costs nothing extra in Forager credits.
-    MAX_PAGES = 10
-    while needed > 0 and page < MAX_PAGES and scanned < candidate_budget:
+    # Discovery is free (search-only), so scan deep enough to fill a large
+    # max_contacts even when buyer-committee titles are sparse on early pages.
+    MAX_PAGES = 30
+    while needed > 0 and page < MAX_PAGES:
         # Fetch the broad set of current people (no Forager-side title filter) so
         # we can apply the full buyer-committee list locally.
         roles = forager.find_contacts_at_company(
@@ -248,7 +275,7 @@ def find_and_create_contacts(
         if not roles:
             break
         for role in roles:
-            if needed <= 0 or scanned >= candidate_budget:
+            if needed <= 0:
                 break
             role_title = role.get("role_title") or ""
             # Title gate (free, local): only buyer-committee titles are created.
@@ -260,30 +287,28 @@ def find_and_create_contacts(
             person_id = person.get("id")
             pid = str(person_id) if person_id else ""
             if pid and pid in seen_person_ids:
-                continue  # already handled (this run or a previous delivery)
+                continue  # already on this company (this run or a previous delivery)
             if pid:
                 seen_person_ids.add(pid)
-            scanned += 1
-            slug = (person.get("linkedin_info") or {}).get("public_identifier")
 
-            # The buyer-committee title match is now the ONLY gate. Pull email +
-            # phone if Forager has them (email lands in Email Home), but do NOT
-            # require an email — every title-matched contact is dumped regardless.
-            emails = forager.get_person_emails(person_id=person_id, linkedin_identifier=slug)
-            phones = forager.get_person_phones(person_id=person_id, linkedin_identifier=slug)
-            fields = forager.parse_person_fields(role, emails, phones)
+            # Skeleton fields only — NO email/phone reveal here (no credits). The
+            # empty email/phone are dropped by HubSpot's clean step; the contact
+            # carries forager_person_id (for dedup) but NOT forager_enriched.
+            fields = forager.parse_person_fields(role, [], [])
             if owner_id:
                 fields["hubspot_owner_id"] = owner_id
 
-            existing = hubspot.find_contact_by_email_home(fields["email_home"])
+            # Cross-company dedup (free HubSpot search): if this person already
+            # exists as a contact, just associate them — don't create a duplicate
+            # and don't re-trigger a reveal.
+            existing = hubspot.find_contact_by_person_id(pid) if pid else None
             if existing:
                 contact_id = existing["id"]
-                hubspot.update_contact(contact_id, fields)
-                action = "updated"
+                action = "exists"
             else:
                 created = hubspot.create_contact(fields)
                 contact_id = created["id"]
-                action = "created"
+                action = "discovered"
 
             try:
                 hubspot.associate_contact_to_company(contact_id, hubspot_company_id)
@@ -294,8 +319,6 @@ def find_and_create_contacts(
             results.append({
                 "contact_id": contact_id,
                 "name": f"{fields.get('firstname', '')} {fields.get('lastname', '')}".strip(),
-                "email_home": fields.get("email_home"),
-                "phone": fields.get("phone"),
                 "title": fields.get("jobtitle"),
                 "action": action,
             })
@@ -303,19 +326,19 @@ def find_and_create_contacts(
 
 
 def handle_company_webhook(hubspot_company_id: str, job_title_filter: str | None = None,
-                           max_contacts: int = 5, force: bool = False) -> dict:
-    """Company-created pipeline: enrich company -> enrich existing contacts -> find new ones."""
+                           max_contacts: int = 50, force: bool = False) -> dict:
+    """Workflow 1 (company-created): enrich the company, then DISCOVER buyer-committee
+    contacts as skeletons. It does NOT enrich them here — creating each skeleton fires
+    the contact-created webhook, which runs Workflow 2 to reveal email/phone. This is
+    the chain reaction: company workflow -> discovered contacts -> contact workflow."""
     company_result = enrich_company(hubspot_company_id, force=force)
     if "error" in company_result:
         return company_result
 
     company_domain = company_result.get("domain", "") or ""
-    existing_contacts = hubspot.get_contacts_for_company(hubspot_company_id)
-    enriched_existing = [enrich_contact(c["id"]) for c in existing_contacts]
-
-    new_contacts = []
+    discovered_contacts = []
     if company_domain:
-        new_contacts = find_and_create_contacts(
+        discovered_contacts = discover_and_create_contacts(
             hubspot_company_id=hubspot_company_id,
             company_domain=company_domain,
             job_title_filter=job_title_filter,
@@ -324,11 +347,10 @@ def handle_company_webhook(hubspot_company_id: str, job_title_filter: str | None
 
     return {
         "company": company_result,
-        "enriched_existing": enriched_existing,
-        "new_contacts": new_contacts,
+        "discovered_contacts": discovered_contacts,
     }
 
 
 def handle_contact_webhook(hubspot_contact_id: str) -> dict:
-    """Contact-created pipeline: enrich the contact."""
+    """Workflow 2 (contact-created): enrich the contact (reveal email/phone)."""
     return enrich_contact(hubspot_contact_id)

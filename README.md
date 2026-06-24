@@ -15,9 +15,15 @@ It can:
 4. **Score the company (Claude)** — alongside enrichment, compute **ICP fit**
    (is this a good Forager prospect?) and **logo recognizability** (brand
    notability, via web search) and write both score sets back to the company.
-5. **Company webhook** — on "company created", auto-run: enrich + score company →
-   enrich existing contacts → find & create new buyer-committee contacts.
-6. **Contact webhook** — on "contact created", auto-enrich that contact.
+5. **Company webhook (Workflow 1)** — on "company created": enrich + score the
+   company, then **discover** buyer-committee people and create them as skeleton
+   contacts (name/title/LinkedIn/company). This spends **no reveal credits** — it
+   does not look up emails/phones.
+6. **Contact webhook (Workflow 2)** — on "contact created": reveal that contact's
+   email + phone (this is where Forager reveal credits are spent). Each skeleton
+   created in Workflow 1 fires this webhook automatically (the "chain reaction"),
+   and a manually-added contact enters here directly. A free duplicate-person
+   check skips any reveal for a person already enriched on another record.
 
 ## Architecture
 
@@ -39,7 +45,12 @@ contacts whose job title matches the **TAM buyer-committee list** (Decision Make
 in `buyer_committee.py`. Everyone else is skipped **before** any credit-spending
 Forager contact lookup. Matching is normalization-tolerant (abbreviations, comma
 variants, seniority prefixes). The optional `job_title_filter` still works as an
-extra narrowing on top of the committee list. `max_contacts` defaults to **5**.
+extra narrowing on top of the committee list. `max_contacts` defaults to **50**.
+
+> ⚠️ **Credit note:** discovery (Workflow 1) is search-only and ≈free. The reveal
+> cost is paid in Workflow 2 — roughly **20–25 Forager credits per contact**, so a
+> company filling all 50 slots can cost ~**1,000–1,250 credits**. The duplicate-
+> person guard ensures the same person is never revealed (paid for) twice.
 
 ## Scoring (LLM — Gemini or Claude)
 

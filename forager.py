@@ -443,7 +443,9 @@ def parse_person_fields(role: dict, emails: list, phones: list) -> dict:
         "firstname": person.get("first_name", "") or "",
         "lastname": person.get("last_name", "") or "",
         "jobtitle": role.get("role_title", "") or "",
-        "email_home": emails[0] if emails else "",
+        # Personal email -> HubSpot's migrated "Email (home)" field (internal name
+        # migrated_emails_home). The built-in `email` stays empty (reserved).
+        "migrated_emails_home": emails[0] if emails else "",
         "phone": phones[0] if phones else "",
         "city": location["city"],
         "state": location["state"],

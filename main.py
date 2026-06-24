@@ -49,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.17 (auto-created contacts assigned to CONTACT_OWNER)"
+BUILD = "v3.18 (split workflows: company discovers -> contact enriches; max_contacts=50; personal email -> migrated_emails_home; duplicate-person credit guard)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
@@ -252,7 +252,7 @@ def webhook():
     payload = request.get_json(force=True, silent=True) or []
     logger.info("/webhook received %d event(s)", len(payload))
     job_title_filter = request.args.get("job_title_filter")
-    max_contacts = _int_arg(request.args.get("max_contacts"), 5)
+    max_contacts = _int_arg(request.args.get("max_contacts"), 50)
     accepted = 0
     for event in payload:
         object_id = str(event.get("objectId", ""))
@@ -276,7 +276,7 @@ def webhook_company():
     payload = request.get_json(force=True, silent=True) or []
     logger.info("/webhook/company received %d event(s)", len(payload))
     job_title_filter = request.args.get("job_title_filter")
-    max_contacts = _int_arg(request.args.get("max_contacts"), 5)
+    max_contacts = _int_arg(request.args.get("max_contacts"), 50)
     accepted = 0
     for event in payload:
         company_id = str(event.get("objectId", ""))
@@ -333,10 +333,10 @@ def manual_find_contacts():
     company_id = body.get("company_id")
     company_domain = body.get("company_domain")
     job_title = body.get("job_title_filter")
-    max_contacts = _int_arg(body.get("max_contacts"), 5)
+    max_contacts = _int_arg(body.get("max_contacts"), 50)
     if not company_id or not company_domain:
         return jsonify({"error": "company_id and company_domain required"}), 400
-    results = enrichment.find_and_create_contacts(
+    results = enrichment.discover_and_create_contacts(
         hubspot_company_id=str(company_id),
         company_domain=company_domain,
         job_title_filter=job_title,
@@ -353,7 +353,7 @@ def demo():
     if not company_id:
         return jsonify({"error": "company_id required"}), 400
     job_title_filter = request.args.get("job_title_filter")
-    max_contacts = _int_arg(request.args.get("max_contacts", body.get("max_contacts")), 5)
+    max_contacts = _int_arg(request.args.get("max_contacts", body.get("max_contacts")), 50)
     # Demo runs the full pipeline synchronously and forces a refresh so you always see results.
     return jsonify(enrichment.handle_company_webhook(
         str(company_id), job_title_filter, max_contacts, force=True)), 200

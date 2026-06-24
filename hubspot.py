@@ -59,7 +59,6 @@ _COMPANY_CUSTOM_PROPS = [
     ("logo_evidence", "Logo Evidence"),
 ]
 _CONTACT_CUSTOM_PROPS = [
-    ("email_home", "Email Home"),
     ("linkedin_url", "LinkedIn Profile URL"),
     ("company_domain", "Company Domain"),
     ("company_linkedin_url", "Company LinkedIn URL"),
@@ -67,9 +66,18 @@ _CONTACT_CUSTOM_PROPS = [
     ("person_headline", "Person Headline"),
     ("person_skills", "Person Skills"),
     ("forager_person_id", "Forager Person ID"),
+    # Set to "true" once Workflow 2 has revealed (and paid for) this contact's
+    # email/phone. Lets the contact webhook tell a freshly DISCOVERED skeleton
+    # (which already carries a forager_person_id) apart from one that's already
+    # been enriched — so re-deliveries / duplicates never re-spend credits.
+    ("forager_enriched", "Forager Enriched"),
     ("all_emails", "All Emails"),
     ("all_phones", "All Phones"),
 ]
+# Personal email is written to HubSpot's migrated "Email (home)" field
+# (internal name below). We no longer use our old custom "Email Home"
+# property — so it is intentionally NOT created here.
+HOME_EMAIL_PROP = "migrated_emails_home"
 
 _COMPANY_PROPS_TO_READ = (
     "name,domain,description,linkedin_company_page,numberofemployees,"
@@ -77,9 +85,10 @@ _COMPANY_PROPS_TO_READ = (
     "icp_match_score"
 )
 _CONTACT_PROPS_TO_READ = (
-    "firstname,lastname,email,email_home,phone,jobtitle,city,state,country,"
+    "firstname,lastname,email,migrated_emails_home,phone,jobtitle,city,state,country,"
     "linkedin_url,hs_linkedin_url,linkedin_profile,"
-    "company,company_domain,company_linkedin_url,all_emails,all_phones,forager_person_id"
+    "company,company_domain,company_linkedin_url,all_emails,all_phones,"
+    "forager_person_id,forager_enriched"
 )
 
 _ensured = False
@@ -290,22 +299,42 @@ def find_contact_by_email(email: str) -> dict | None:
     return results[0] if results else None
 
 
-def find_contact_by_email_home(email: str) -> dict | None:
-    """Dedup lookup on our custom Email Home property. The built-in email field is
-    left empty on purpose, so HubSpot's native email uniqueness can't be relied on."""
-    if not email:
-        return None
+def _search_contacts_by_person_id(person_id: str, enriched_only: bool) -> list[dict]:
+    """Search contacts carrying a given Forager person id. Costs NO Forager credits
+    (it's a HubSpot search). When enriched_only, also require forager_enriched=true."""
+    if not person_id:
+        return []
+    filters = [{"propertyName": "forager_person_id", "operator": "EQ", "value": str(person_id)}]
+    if enriched_only:
+        filters.append({"propertyName": "forager_enriched", "operator": "EQ", "value": "true"})
     body = {
-        "filterGroups": [{"filters": [{"propertyName": "email_home", "operator": "EQ", "value": email}]}],
-        "properties": ["firstname", "lastname", "email_home"],
-        "limit": 1,
+        "filterGroups": [{"filters": filters}],
+        "properties": ["firstname", "lastname", "forager_person_id", "forager_enriched"],
+        "limit": 10,
     }
     resp = _SESSION.post(
         f"{HUBSPOT_BASE}/crm/v3/objects/contacts/search", json=body, headers=_headers(), timeout=30,
     )
     resp.raise_for_status()
-    results = resp.json().get("results", [])
-    return results[0] if results else None
+    return resp.json().get("results", [])
+
+
+def find_contact_by_person_id(person_id: str, exclude_id: str | None = None) -> dict | None:
+    """Any existing contact (enriched or not) for this Forager person — used by the
+    company discovery step to avoid creating duplicate skeleton records."""
+    for contact in _search_contacts_by_person_id(person_id, enriched_only=False):
+        if exclude_id is None or str(contact.get("id")) != str(exclude_id):
+            return contact
+    return None
+
+
+def find_enriched_contact_by_person_id(person_id: str, exclude_id: str | None = None) -> dict | None:
+    """An ALREADY-ENRICHED contact for this Forager person on a DIFFERENT record —
+    used by the contact workflow to skip a duplicate reveal (no credits spent)."""
+    for contact in _search_contacts_by_person_id(person_id, enriched_only=True):
+        if exclude_id is None or str(contact.get("id")) != str(exclude_id):
+            return contact
+    return None
 
 
 def update_contact(contact_id: str, properties: dict) -> dict:
