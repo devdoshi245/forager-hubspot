@@ -28,6 +28,10 @@ import scoring
 
 logger = logging.getLogger(__name__)
 
+# Rough Forager credit cost to reveal ONE contact's email + phone. Used only for
+# the log estimate below — Forager bills the real amount (~20-25 in practice).
+EST_CREDITS_PER_REVEAL = 25
+
 
 def _linkedin_slug(url: str) -> str | None:
     """Extract the slug from a LinkedIn personal URL (.../in/<slug>)."""
@@ -211,6 +215,11 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
         fields["forager_person_id"] = person_id
 
     hubspot.update_contact(hubspot_contact_id, fields)
+    logger.info(
+        "Enriched contact %s (%s): revealed email/phone, est ~%d Forager credits",
+        hubspot_contact_id, fields.get("company") or props.get("company") or "?",
+        EST_CREDITS_PER_REVEAL,
+    )
     return {
         "hubspot_contact_id": hubspot_contact_id,
         "status": "enriched",
@@ -218,6 +227,7 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
         "migrated_emails_home": fields.get("migrated_emails_home"),
         "phone": fields.get("phone"),
         "title": fields.get("jobtitle") or props.get("jobtitle"),
+        "est_forager_credits": EST_CREDITS_PER_REVEAL,
     }
 
 
@@ -263,9 +273,9 @@ def discover_and_create_contacts(
 
     page = 0
     # Discovery is free (search-only) and the loop auto-stops when Forager runs
-    # out of people, so scan deep: a high cap only matters for huge companies
-    # where qualifying titles are spread across many pages.
-    MAX_PAGES = 100
+    # out of people, so scan deep: a high cap only costs a little time on giant
+    # companies, never credits. Reveal spend stays bounded by max_contacts.
+    MAX_PAGES = 300
     # Diagnostics so we can always tell WHY a company returned few contacts:
     # did we run out of Forager people, or hit the page cap with more remaining?
     people_scanned = 0
@@ -339,6 +349,11 @@ def discover_and_create_contacts(
         stop_reason = f"hit page cap ({MAX_PAGES}) — more people likely remain; raise MAX_PAGES"
 
     created_count = sum(1 for r in results if r.get("contact_id"))
+    # Only brand-new skeletons ("discovered") trigger a paid reveal in Workflow 2;
+    # "exists" links re-use an existing contact and cost nothing more. Discovery
+    # itself spends 0 credits — est_reveal_credits is a forecast of the spend to come.
+    new_count = sum(1 for r in results if r.get("action") == "discovered")
+    est_reveal_credits = new_count * EST_CREDITS_PER_REVEAL
     diagnostic = {
         "domain": company_domain,
         "forager_total_people": total_available,
@@ -346,13 +361,18 @@ def discover_and_create_contacts(
         "pages_scanned": page,
         "buyer_committee_matches": matches_found,
         "contacts_created_or_linked": created_count,
+        "new_contacts_to_reveal": new_count,
+        "discovery_credits_spent": 0,
+        "estimated_reveal_credits": est_reveal_credits,
         "max_contacts": max_contacts,
         "stop_reason": stop_reason,
     }
     logger.info(
-        "Discovery %s: total_people=%s scanned=%d pages=%d matched=%d created=%d cap=%d stop=%r",
+        "Discovery %s: total_people=%s scanned=%d pages=%d matched=%d created=%d "
+        "discovery_credits=0 est_reveal_credits=~%d (%d new x ~%d) cap=%d stop=%r",
         company_domain, total_available, people_scanned, page, matches_found,
-        created_count, max_contacts, stop_reason,
+        created_count, est_reveal_credits, new_count, EST_CREDITS_PER_REVEAL,
+        max_contacts, stop_reason,
     )
     results.append({"diagnostic": diagnostic})
     return results

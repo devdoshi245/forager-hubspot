@@ -49,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.19 (discovery scans up to 100 pages + logs a diagnostic: total people / scanned / matched / stop reason)"
+BUILD = "v3.20 (discovery scans up to 300 pages; logs discovery_credits=0 + est_reveal_credits forecast; per-contact reveal credit estimate)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
