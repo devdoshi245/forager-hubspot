@@ -216,26 +216,16 @@ def _clean_linkedin_url(url: str) -> str:
 
 
 def _company_location(org: dict) -> dict:
-    """City / state / country for a company, robust to Forager's varying shapes.
+    """City / state / country for a company's HEADQUARTERS — taken ONLY from Forager's
+    canonical ``location`` (its ``osm_locations``).
 
-    Forager's flat company address often carries city + country but an EMPTY state,
-    while the richer ``osm_locations`` structure (the same one used for people) does
-    include the state/region. So we read the flat address first, then backfill any
-    missing piece from osm_locations on the address or the org."""
-    addresses = org.get("addresses") or []
-    addr = addresses[0] if isinstance(addresses, list) and addresses else {}
-    city = (addr.get("city") or "").strip()
-    state = (addr.get("state") or addr.get("region") or addr.get("state_name") or "").strip()
-    country = (addr.get("country") or "").strip()
-    if not (city and state and country):
-        for loc in (addr, addr.get("location"), org.get("location")):
-            if isinstance(loc, dict) and loc.get("osm_locations"):
-                parts = _location_parts(loc)
-                city = city or parts["city"]
-                state = state or parts["state"]
-                country = country or parts["country"]
-                break
-    return {"city": city, "state": state, "country": country}
+    We deliberately do NOT fall back to the ``addresses`` array. ``addresses`` is an
+    unordered list of ALL of a company's global offices, so ``addresses[0]`` is not
+    the HQ — e.g. for Infosys it is the Seoul, KR office, which is what wrote a Korean
+    city/country onto an India-HQ'd company. The canonical ``location`` is the single
+    source of truth; if it is missing a field we leave that field blank rather than
+    write a non-HQ office's value."""
+    return _location_parts(org.get("location"))
 
 
 def parse_company_fields(org: dict) -> dict:
