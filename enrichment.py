@@ -218,9 +218,10 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
     else:
         fields = {}
         union = list(dict.fromkeys(work_emails + personal_emails))
-        if work_emails:                       # WORK email -> standard `email`
+        if work_emails:                       # WORK email -> standard `email` + dedicated `work_email`
             fields["email"] = work_emails[0]
-        if personal_emails:                   # PERSONAL email -> "Email (home)"
+            fields["work_email"] = work_emails[0]
+        if personal_emails:                   # PERSONAL email -> "Emails (home)"
             fields["migrated_emails_home"] = personal_emails[0]
         if union:
             fields["all_emails"] = ", ".join(union)
