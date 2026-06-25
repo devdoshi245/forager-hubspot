@@ -50,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.25 (additive Deepline: Workflow 3 work-email + phone waterfalls with ZeroBounce/Trestle gating; company Funding; dormant unless DEEPLINE_API_KEY set — no change to existing behavior)"
+BUILD = "v3.26 (merge: WORK email -> `email` / PERSONAL -> Email(home) + 409 tolerated [client] WITH additive Deepline Workflow 3 work-email+phone waterfalls (ZeroBounce/Trestle) + company Funding, dormant unless DEEPLINE_API_KEY set)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 

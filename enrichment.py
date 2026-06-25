@@ -205,20 +205,25 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
                 "duplicate_of": dup.get("id"),
             }
 
-    # (4) Reveal email + phone (THIS spends Forager credits).
-    emails = forager.get_person_emails(person_id=person_id, linkedin_identifier=slug)
+    # (4) Reveal email + phone (THIS spends Forager credits). Work and personal emails
+    # are pulled separately so we can route work -> standard `email`, personal -> `migrated_emails_home`.
+    personal_emails, work_emails = forager.get_person_emails_split(person_id=person_id, linkedin_identifier=slug)
     phones = forager.get_person_phones(person_id=person_id, linkedin_identifier=slug)
 
     # (5) Build the write. A manual contact gets its full profile from `role`; a
     # discovered skeleton already has its profile, so we only add the revealed
     # contact details. Either way, stamp forager_enriched so we never re-spend.
     if role:
-        fields = forager.parse_person_fields(role, emails, phones)
+        fields = forager.parse_person_fields(role, personal_emails, work_emails, phones)
     else:
         fields = {}
-        if emails:
-            fields["migrated_emails_home"] = emails[0]
-            fields["all_emails"] = ", ".join(emails)
+        union = list(dict.fromkeys(work_emails + personal_emails))
+        if work_emails:                       # WORK email -> standard `email`
+            fields["email"] = work_emails[0]
+        if personal_emails:                   # PERSONAL email -> "Email (home)"
+            fields["migrated_emails_home"] = personal_emails[0]
+        if union:
+            fields["all_emails"] = ", ".join(union)
         if phones:
             fields["phone"] = phones[0]
             fields["all_phones"] = ", ".join(phones)
@@ -228,14 +233,15 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
 
     hubspot.update_contact(hubspot_contact_id, fields)
     logger.info(
-        "Enriched contact %s (%s): revealed email/phone, est ~%d Forager credits",
+        "Enriched contact %s (%s): work_email=%d personal_email=%d phone=%d, est ~%d Forager credits",
         hubspot_contact_id, fields.get("company") or props.get("company") or "?",
-        EST_CREDITS_PER_REVEAL,
+        len(work_emails), len(personal_emails), len(phones), EST_CREDITS_PER_REVEAL,
     )
     return {
         "hubspot_contact_id": hubspot_contact_id,
         "status": "enriched",
         "matched_by": "forager_person_id" if not role else "linkedin",
+        "email": fields.get("email"),
         "migrated_emails_home": fields.get("migrated_emails_home"),
         "phone": fields.get("phone"),
         "title": fields.get("jobtitle") or props.get("jobtitle"),
@@ -263,7 +269,7 @@ def _create_skeleton_from_role(role: dict, hubspot_company_id: str, owner_id,
 
     # Skeleton fields only — empty email/phone are dropped by HubSpot's clean step;
     # the contact carries forager_person_id (for dedup) but NOT forager_enriched.
-    fields = forager.parse_person_fields(role, [], [])
+    fields = forager.parse_person_fields(role, [], [], [])  # skeleton only — no email/phone
     if owner_id:
         fields["hubspot_owner_id"] = owner_id
 
@@ -578,21 +584,24 @@ def workflow3_deepline(hubspot_contact_id: str) -> dict:
         "first_name": first,
         "last_name": last,
         "full_name": f"{first} {last}".strip(),
-        "domain": (props.get("company_domain") or "").strip(),
+        "domain": forager.normalize_domain(props.get("company_domain") or ""),
         "company_name": (props.get("company") or "").strip(),
         "linkedin_url": (props.get("linkedin_url") or props.get("hs_linkedin_url") or "").strip(),
         "email": (props.get("migrated_emails_home") or "").strip(),  # personal email helps phone lookups
     }
+    # Deepline is the FALLBACK after Forager: if Forager already put a work email in the
+    # built-in `email` field (or a phone in `phone`), skip that waterfall ENTIRELY — don't
+    # even look it up (saves provider credits). Per Shirish's call.
+    has_work_email = bool((props.get("email") or "").strip())
     has_phone = bool((props.get("phone") or "").strip())
 
-    # Run the two waterfalls in parallel (each is independent and I/O-bound).
+    # Run the (needed) waterfalls in parallel (each is independent and I/O-bound).
     import concurrent.futures as _f
     email_res, phone_res = {}, {}
     with _f.ThreadPoolExecutor(max_workers=2) as pool:
-        email_future = pool.submit(deepline.run_email_waterfall, inp)
-        # Phone is the fallback after Forager — only run it when no phone exists yet.
+        email_future = pool.submit(deepline.run_email_waterfall, inp) if not has_work_email else None
         phone_future = pool.submit(deepline.run_phone_waterfall, inp) if not has_phone else None
-        email_res = email_future.result() or {}
+        email_res = (email_future.result() or {}) if email_future else {}
         phone_res = (phone_future.result() or {}) if phone_future else {}
 
     update: dict = {"deepline_enriched": "true"}
@@ -618,6 +627,7 @@ def workflow3_deepline(hubspot_contact_id: str) -> dict:
         "status": "deepline_enriched",
         "work_email": email_res.get("value"),
         "email_provider": (email_res.get("meta") or {}).get("smtp_provider"),
+        "email_skipped_existing": has_work_email,
         "phone": phone_res.get("value"),
         "phone_skipped_existing": has_phone,
     }

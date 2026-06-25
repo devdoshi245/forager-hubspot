@@ -160,6 +160,15 @@ def _write_with_retry(method: str, url: str, properties: dict) -> dict:
                 logger.warning("HubSpot rejected properties %s; retrying without them", offending)
                 if clean:
                     continue
+        # 409 = unique-property conflict (almost always `email` already on another
+        # contact). Drop `email` and retry so the rest of the write still lands and
+        # forager_enriched gets stamped (no credit re-spend); the email survives in
+        # `all_emails` / `migrated_emails_home`.
+        if resp.status_code == 409 and clean.get("email"):
+            logger.warning("HubSpot 409 conflict on email=%r; retrying without `email`", clean.get("email"))
+            clean.pop("email", None)
+            if clean:
+                continue
         resp.raise_for_status()
         return resp.json()
     return {}
