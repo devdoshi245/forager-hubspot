@@ -22,6 +22,7 @@ Capabilities:
 import logging
 
 import buyer_committee
+import deepline
 import forager
 import hubspot
 import scoring
@@ -114,6 +115,17 @@ def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
     # recognizability via Claude). Skips gracefully if scoring isn't configured,
     # and never blocks the Forager write-back on a scoring failure.
     scores = scoring.score_company(fields.get("name") or name, fields)
+
+    # Funding via Deepline (additive + dormant): only when Deepline is enabled AND
+    # the Funding field is still empty. When DEEPLINE_API_KEY is unset this is a no-op,
+    # so the company flow is unchanged from before.
+    if deepline.is_enabled() and not (props.get("funding") or "").strip():
+        try:
+            funding = deepline.get_company_funding(fields.get("domain") or domain, fields.get("name") or name)
+            if funding:
+                fields["funding"] = funding
+        except Exception as exc:  # noqa: BLE001 - funding must never break enrichment
+            logger.warning("Deepline funding lookup failed for %s: %s", hubspot_company_id, exc)
 
     hubspot.update_company(hubspot_company_id, {**fields, **scores.get("hubspot_fields", {})})
     return {
@@ -525,6 +537,101 @@ def handle_company_webhook(hubspot_company_id: str, job_title_filter: str | None
     }
 
 
+def workflow3_deepline(hubspot_contact_id: str) -> dict:
+    """Workflow 3 — Deepline work-email + phone enrichment for one contact.
+
+    Runs AFTER Workflow 2 has finished for the contact. Additive + dormant: returns
+    immediately unless DEEPLINE_API_KEY is set, so it changes nothing when Deepline
+    is off. Idempotent via the `deepline_enriched` flag, and duplicate-safe via the
+    same Forager-person-id check Workflow 2 uses.
+
+    The work-email and phone waterfalls run IN PARALLEL. The phone waterfall is
+    skipped when the contact already has a phone (Deepline is the fallback after
+    Forager, per spec). Work email -> built-in Email field; phone -> Phone field.
+    """
+    if not deepline.is_enabled():
+        return {"status": "skipped", "reason": "deepline disabled"}
+
+    contact = hubspot.get_contact(hubspot_contact_id)
+    if not contact:
+        return {"error": f"Contact {hubspot_contact_id} not found"}
+    props = contact.get("properties", {})
+
+    # Idempotency: never re-run Deepline on a contact we've already done.
+    if (props.get("deepline_enriched") or "").strip().lower() == "true":
+        return {"hubspot_contact_id": hubspot_contact_id, "status": "skipped",
+                "reason": "already deepline-enriched"}
+
+    # Duplicate-person guard (free HubSpot search): if this person is already
+    # Deepline-enriched on another record, don't pay to enrich them again.
+    person_id = (props.get("forager_person_id") or "").strip() or None
+    if person_id:
+        dup = hubspot.find_deepline_contact_by_person_id(person_id, exclude_id=hubspot_contact_id)
+        if dup:
+            hubspot.update_contact(hubspot_contact_id, {"deepline_enriched": "true"})
+            return {"hubspot_contact_id": hubspot_contact_id, "status": "skipped",
+                    "reason": f"duplicate of deepline-enriched contact {dup.get('id')}"}
+
+    first = (props.get("firstname") or "").strip()
+    last = (props.get("lastname") or "").strip()
+    inp = {
+        "first_name": first,
+        "last_name": last,
+        "full_name": f"{first} {last}".strip(),
+        "domain": (props.get("company_domain") or "").strip(),
+        "company_name": (props.get("company") or "").strip(),
+        "linkedin_url": (props.get("linkedin_url") or props.get("hs_linkedin_url") or "").strip(),
+        "email": (props.get("migrated_emails_home") or "").strip(),  # personal email helps phone lookups
+    }
+    has_phone = bool((props.get("phone") or "").strip())
+
+    # Run the two waterfalls in parallel (each is independent and I/O-bound).
+    import concurrent.futures as _f
+    email_res, phone_res = {}, {}
+    with _f.ThreadPoolExecutor(max_workers=2) as pool:
+        email_future = pool.submit(deepline.run_email_waterfall, inp)
+        # Phone is the fallback after Forager — only run it when no phone exists yet.
+        phone_future = pool.submit(deepline.run_phone_waterfall, inp) if not has_phone else None
+        email_res = email_future.result() or {}
+        phone_res = (phone_future.result() or {}) if phone_future else {}
+
+    update: dict = {"deepline_enriched": "true"}
+    if email_res.get("value"):
+        update["email"] = email_res["value"]  # work email -> built-in Email field
+        if (email_res.get("meta") or {}).get("smtp_provider"):
+            update["email_smtp_provider"] = email_res["meta"]["smtp_provider"]
+    if phone_res.get("value"):
+        meta = phone_res.get("meta") or {}
+        update["phone"] = phone_res["value"]
+        if meta.get("activity_score") is not None:
+            update["phone_activity_score"] = meta["activity_score"]
+        if meta.get("line_type"):
+            update["phone_line_type"] = meta["line_type"]
+        if meta.get("country"):
+            update["phone_country"] = meta["country"]
+        if meta.get("calling_code"):
+            update["phone_calling_code"] = meta["calling_code"]
+
+    hubspot.update_contact(hubspot_contact_id, update)
+    return {
+        "hubspot_contact_id": hubspot_contact_id,
+        "status": "deepline_enriched",
+        "work_email": email_res.get("value"),
+        "email_provider": (email_res.get("meta") or {}).get("smtp_provider"),
+        "phone": phone_res.get("value"),
+        "phone_skipped_existing": has_phone,
+    }
+
+
 def handle_contact_webhook(hubspot_contact_id: str) -> dict:
-    """Workflow 2 (contact-created): enrich the contact (reveal email/phone)."""
-    return enrich_contact(hubspot_contact_id)
+    """Workflow 2 (contact-created): enrich the contact (reveal email/phone), then —
+    once that has finished — trigger Workflow 3 (Deepline). Workflow 3 is dormant
+    unless DEEPLINE_API_KEY is set, so this is identical to before when Deepline is off."""
+    result = enrich_contact(hubspot_contact_id)
+    if deepline.is_enabled():
+        try:
+            result = {"workflow2": result, "workflow3": workflow3_deepline(hubspot_contact_id)}
+        except Exception as exc:  # noqa: BLE001 - WF3 must never break WF2 / the webhook
+            logger.exception("Workflow 3 (Deepline) failed for %s", hubspot_contact_id)
+            result = {"workflow2": result, "workflow3": {"error": str(exc)}}
+    return result

@@ -38,6 +38,7 @@ load_dotenv()
 import alerts       # noqa: E402  (import after load_dotenv so env vars are set)
 import auth         # noqa: E402
 import background   # noqa: E402
+import deepline     # noqa: E402
 import enrichment   # noqa: E402
 import forager      # noqa: E402
 import hubspot      # noqa: E402
@@ -49,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.24 (discovery: STRICT exact-title match (matches_buyer_committee_exact) re-confirms hits; role_title sent as quoted phrase so multi-word titles work; title-bucketed + parent-org-isolated; priority order; cap 10)"
+BUILD = "v3.25 (additive Deepline: Workflow 3 work-email + phone waterfalls with ZeroBounce/Trestle gating; company Funding; dormant unless DEEPLINE_API_KEY set — no change to existing behavior)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
@@ -159,6 +160,7 @@ def debug_config():
         "missing_required_env": _missing_required_env(),
         "auth_enabled": auth.is_enabled(),
         "scoring_provider": scoring.provider(),   # "gemini" | "anthropic" | null
+        "deepline_enabled": deepline.is_enabled(),
         "alerts_configured": alerts.is_configured(),
         "queue_depth": background.queue_size(),
     }), 200
@@ -324,6 +326,33 @@ def manual_enrich_contact():
     if not contact_id:
         return jsonify({"error": "contact_id required"}), 400
     return jsonify(enrichment.enrich_contact(str(contact_id))), 200
+
+
+@app.route("/enrich/deepline", methods=["POST"])
+@require_secret
+def manual_deepline():
+    """Manually run Workflow 3 (Deepline) on one contact — for controlled testing
+    once the Deepline key + credits are in place. {"contact_id": "123"}."""
+    body = request.get_json(force=True, silent=True) or {}
+    contact_id = body.get("contact_id")
+    if not contact_id:
+        return jsonify({"error": "contact_id required"}), 400
+    return jsonify(enrichment.workflow3_deepline(str(contact_id))), 200
+
+
+@app.route("/debug/deepline", methods=["GET", "POST"])
+@require_secret
+def debug_deepline():
+    """Dormant-safe Deepline check: confirms the key is set and (optionally) runs one
+    tool. Pass ?tool=zerobounce_validate&email=test@stripe.com to probe a single tool.
+    Spends provider credits only if you pass a tool to run."""
+    out = {"deepline_enabled": deepline.is_enabled()}
+    tool = request.args.get("tool")
+    if tool and deepline.is_enabled():
+        payload = {k: v for k, v in request.args.items() if k != "tool" and k != "token"}
+        out["tool"] = tool
+        out["result"] = deepline.execute_tool(tool, payload)
+    return jsonify(out), 200
 
 
 @app.route("/enrich/find-contacts", methods=["POST"])

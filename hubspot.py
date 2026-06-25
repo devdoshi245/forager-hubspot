@@ -74,6 +74,16 @@ _CONTACT_CUSTOM_PROPS = [
     ("all_emails", "All Emails"),
     ("all_phones", "All Phones"),
 ]
+# Deepline / Workflow 3 contact properties. Created ONLY when DEEPLINE_API_KEY is set
+# (see ensure_custom_properties), so an account with Deepline off gets zero new fields.
+_DEEPLINE_CONTACT_PROPS = [
+    ("email_smtp_provider", "Email SMTP Provider"),
+    ("phone_activity_score", "Phone Activity Score", "number"),
+    ("phone_line_type", "Phone Line Type"),
+    ("phone_country", "Phone Country"),
+    ("phone_calling_code", "Phone Calling Code"),
+    ("deepline_enriched", "Deepline Enriched"),
+]
 # Personal email is written to HubSpot's migrated "Email (home)" field
 # (internal name below). We no longer use our old custom "Email Home"
 # property — so it is intentionally NOT created here.
@@ -88,7 +98,7 @@ _CONTACT_PROPS_TO_READ = (
     "firstname,lastname,email,migrated_emails_home,phone,jobtitle,city,state,country,"
     "linkedin_url,hs_linkedin_url,linkedin_profile,"
     "company,company_domain,company_linkedin_url,all_emails,all_phones,"
-    "forager_person_id,forager_enriched"
+    "forager_person_id,forager_enriched,deepline_enriched"
 )
 
 _ensured = False
@@ -164,7 +174,12 @@ def ensure_custom_properties() -> None:
     if _ensured:
         return
     _create_properties("companies", "companyinformation", _COMPANY_CUSTOM_PROPS)
-    _create_properties("contacts", "contactinformation", _CONTACT_CUSTOM_PROPS)
+    contact_props = list(_CONTACT_CUSTOM_PROPS)
+    # Only create the Deepline fields when Deepline is configured — keeps the
+    # client's HubSpot untouched until they turn Deepline on.
+    if os.environ.get("DEEPLINE_API_KEY"):
+        contact_props += _DEEPLINE_CONTACT_PROPS
+    _create_properties("contacts", "contactinformation", contact_props)
     _ensured = True
 
 
@@ -332,6 +347,29 @@ def find_enriched_contact_by_person_id(person_id: str, exclude_id: str | None = 
     """An ALREADY-ENRICHED contact for this Forager person on a DIFFERENT record —
     used by the contact workflow to skip a duplicate reveal (no credits spent)."""
     for contact in _search_contacts_by_person_id(person_id, enriched_only=True):
+        if exclude_id is None or str(contact.get("id")) != str(exclude_id):
+            return contact
+    return None
+
+
+def find_deepline_contact_by_person_id(person_id: str, exclude_id: str | None = None) -> dict | None:
+    """An already-DEEPLINE-enriched contact for this Forager person on a DIFFERENT
+    record — lets Workflow 3 skip a duplicate Deepline run (no provider credits)."""
+    if not person_id:
+        return None
+    body = {
+        "filterGroups": [{"filters": [
+            {"propertyName": "forager_person_id", "operator": "EQ", "value": str(person_id)},
+            {"propertyName": "deepline_enriched", "operator": "EQ", "value": "true"},
+        ]}],
+        "properties": ["forager_person_id", "deepline_enriched"],
+        "limit": 10,
+    }
+    resp = _SESSION.post(
+        f"{HUBSPOT_BASE}/crm/v3/objects/contacts/search", json=body, headers=_headers(), timeout=30,
+    )
+    resp.raise_for_status()
+    for contact in resp.json().get("results", []):
         if exclude_id is None or str(contact.get("id")) != str(exclude_id):
             return contact
     return None
