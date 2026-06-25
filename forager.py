@@ -584,7 +584,9 @@ def parse_person_fields(role: dict, personal_emails: list, work_emails: list, ph
         "city": location["city"],
         "state": location["state"],
         "country": location["country"],
-        "linkedin_url": _clean_linkedin_url(person_li.get("public_profile_url", "") or ""),
+        # Person LinkedIn -> HubSpot-native `hs_linkedin_url` (the portal-wide standard:
+        # ~8,521 contacts use it vs ~115 on the custom `linkedin_url`; writable, readOnlyValue=false).
+        "hs_linkedin_url": _clean_linkedin_url(person_li.get("public_profile_url", "") or ""),
         "company": org.get("name", "") or "",
         "company_domain": org.get("domain", "") or "",
         "company_linkedin_url": _clean_linkedin_url(org_li.get("public_profile_url", "") or ""),

@@ -50,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.26 (merge: WORK email -> `email` / PERSONAL -> Email(home) + 409 tolerated [client] WITH additive Deepline Workflow 3 work-email+phone waterfalls (ZeroBounce/Trestle) + company Funding, dormant unless DEEPLINE_API_KEY set)"
+BUILD = "v3.27 (person LinkedIn -> HubSpot-native `hs_linkedin_url` (portal standard) instead of custom `linkedin_url`. + v3.26 work/personal email routing + Deepline Workflow 3 dormant unless DEEPLINE_API_KEY)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
