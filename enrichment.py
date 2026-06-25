@@ -231,28 +231,86 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
     }
 
 
+# Forager's regular person_role_search windows results at ~500 per query (10 rows/page),
+# so a single title can be paged at most this far before it runs dry.
+_MAX_PAGES_PER_TITLE = 50
+
+
+def _create_skeleton_from_role(role: dict, hubspot_company_id: str, owner_id,
+                               seen_person_ids: set) -> dict | None:
+    """Create (or link) a HubSpot skeleton contact from a Forager role record and
+    associate it to the company. Spends NO reveal credits — creating the skeleton fires
+    the contact-created webhook, which runs Workflow 2 to reveal email/phone. Returns a
+    result dict, or None if this person was already created/seen this run."""
+    person = role.get("person") or {}
+    pid = str(person.get("id")) if person.get("id") else ""
+    if pid and pid in seen_person_ids:
+        return None
+    if pid:
+        seen_person_ids.add(pid)
+
+    # Skeleton fields only — empty email/phone are dropped by HubSpot's clean step;
+    # the contact carries forager_person_id (for dedup) but NOT forager_enriched.
+    fields = forager.parse_person_fields(role, [], [])
+    if owner_id:
+        fields["hubspot_owner_id"] = owner_id
+
+    # Cross-company dedup (free HubSpot search): if this person already exists as a
+    # contact, just associate them — don't create a duplicate or re-trigger a reveal.
+    existing = hubspot.find_contact_by_person_id(pid) if pid else None
+    if existing:
+        contact_id = existing["id"]
+        action = "exists"
+    else:
+        created = hubspot.create_contact(fields)
+        contact_id = created["id"]
+        action = "discovered"
+
+    try:
+        hubspot.associate_contact_to_company(contact_id, hubspot_company_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Association failed for contact %s: %s", contact_id, exc)
+
+    return {
+        "contact_id": contact_id,
+        "name": f"{fields.get('firstname', '')} {fields.get('lastname', '')}".strip(),
+        "title": fields.get("jobtitle"),
+        "action": action,
+    }
+
+
 def discover_and_create_contacts(
     hubspot_company_id: str,
     company_domain: str,
+    forager_org_id: str | None = None,
     job_title_filter: str | None = None,
-    max_contacts: int = 50,
+    max_contacts: int = 10,
 ) -> list[dict]:
-    """Workflow 1's contact step — DISCOVER people at a company and create them as
-    skeleton contacts. This spends NO reveal credits: it only searches (≈free) and
-    writes the profile fields the search already returns (name, title, LinkedIn,
-    company). Each created contact then fires HubSpot's contact-created webhook,
-    which triggers Workflow 2 (``enrich_contact``) to reveal the email/phone.
+    """Workflow 1's contact step — DISCOVER buyer-committee people at a company by their
+    EXACT title and create them as skeleton contacts. Each skeleton fires Workflow 2
+    (``enrich_contact``) to reveal email/phone, so discovery itself spends no reveal
+    credits; the reveal happens once per created contact.
 
-    Only TAM buyer-committee titles (``buyer_committee.matches_buyer_committee``) are
-    created; ``job_title_filter`` narrows further. Idempotent: people already on the
-    company (or already a contact anywhere, by Forager person id) are not duplicated,
-    and existing contacts count toward ``max_contacts``.
+    Method (title-bucketed, parent-org-isolated — the new default):
+      * Isolate to the MAIN company via ``organizations:[forager_org_id]`` so subsidiary
+        member-firms that merely share the domain (e.g. all ~92 'kpmg.com' entities) are
+        EXCLUDED. The org id comes from enrich_company; if absent it is resolved from the
+        domain (~1 credit) so the manual /enrich/find-contacts path works too.
+      * For each EXACT buyer-committee title, ask Forager's FREE ``/totals/`` endpoint how
+        many people hold it (0 credits), then page the PAID ``person_role_search`` only on
+        titles that actually have people (server-side ``role_title`` keyword).
+      * Re-confirm every hit locally with ``matches_buyer_committee`` (role_title is fuzzy)
+        and create a skeleton, up to ``max_contacts`` (default 10).
+
+    Falls back to the old domain-wide pagination only when the org id cannot be resolved.
+    Idempotent: people already on the company (by Forager person id) are not duplicated
+    and count toward ``max_contacts``.
     """
     hubspot.ensure_custom_properties()
 
-    # What does the company already have? Count contacts we've stamped (skeleton or
-    # enriched) and remember their Forager person ids so we don't re-create them.
-    seen_person_ids: set[str] = set()
+    # What does the company already have? Count stamped contacts (skeleton or enriched)
+    # and remember their Forager person ids so we don't re-create them.
+    seen_person_ids: set = set()
     already = 0
     for existing_contact in hubspot.get_contacts_for_company(hubspot_company_id):
         cp = existing_contact.get("properties", {})
@@ -262,29 +320,117 @@ def discover_and_create_contacts(
             already += 1
 
     needed = max_contacts - already
-    results: list[dict] = []
+    results: list = []
     if needed <= 0:
         return [{"status": "skipped",
                  "reason": f"company already has {already} contact(s); max is {max_contacts}"}]
 
-    # Auto-created contacts are assigned to the configured Contact Owner
-    # (CONTACT_OWNER env var, e.g. "OneGTM Labs") so they don't land unassigned.
+    # Auto-created contacts go to the configured Contact Owner so they don't land unassigned.
     owner_id = hubspot.auto_create_owner_id()
 
-    page = 0
-    # Discovery is free (search-only) and the loop auto-stops when Forager runs
-    # out of people, so scan deep: a high cap only costs a little time on giant
-    # companies, never credits. Reveal spend stays bounded by max_contacts.
-    MAX_PAGES = 300
-    # Diagnostics so we can always tell WHY a company returned few contacts:
-    # did we run out of Forager people, or hit the page cap with more remaining?
+    # Resolve the PARENT org id (the only thing that excludes same-domain subsidiaries).
+    if not forager_org_id and company_domain:
+        org = forager.search_organization(domain=company_domain)
+        forager_org_id = str((org or {}).get("id") or "") or None
+
+    if not forager_org_id:
+        logger.warning("No Forager org id for domain=%r — falling back to domain pagination", company_domain)
+        return _discover_by_domain_pagination(
+            hubspot_company_id, company_domain, job_title_filter,
+            max_contacts, needed, seen_person_ids, owner_id, results,
+        )
+
+    # --- Title-bucketed, parent-org-isolated discovery ---
+    titles = buyer_committee.committee_titles()
+    if job_title_filter:
+        titles = [t for t in titles if job_title_filter.lower() in t.lower()]
+
+    # FREE pre-filter: which exact titles actually have people at the parent org? (0 credits)
+    title_counts = [(t, forager.role_title_totals(forager_org_id, t)) for t in titles]
+    nonzero = sorted([(t, n) for t, n in title_counts if n > 0], key=lambda x: -x[1])
+
+    search_credits = 0
     people_scanned = 0
     matches_found = 0
-    total_available: int | None = None
+    stop_reason = "reached max_contacts (cap filled)"
+
+    for title, _count in nonzero:
+        if needed <= 0:
+            break
+        page = 0
+        while needed > 0 and page < _MAX_PAGES_PER_TITLE:
+            roles, _total = forager.find_contacts_by_role_title(forager_org_id, title, page=page)
+            search_credits += 1  # person_role_search = 1 credit/page (the totals above were free)
+            page += 1
+            if not roles:
+                break
+            for role in roles:
+                if needed <= 0:
+                    break
+                people_scanned += 1
+                # role_title is a fuzzy server filter — re-confirm against the committee.
+                if not buyer_committee.matches_buyer_committee(role.get("role_title") or ""):
+                    continue
+                res = _create_skeleton_from_role(role, hubspot_company_id, owner_id, seen_person_ids)
+                if res is None:
+                    continue
+                res["matched_title"] = title
+                results.append(res)
+                matches_found += 1
+                needed -= 1
+
+    if needed > 0:
+        stop_reason = "exhausted buyer-committee titles with matches (fewer than cap available)"
+
+    created_count = sum(1 for r in results if r.get("contact_id"))
+    new_count = sum(1 for r in results if r.get("action") == "discovered")
+    est_reveal_credits = new_count * EST_CREDITS_PER_REVEAL
+    diagnostic = {
+        "method": "title_bucketed_org_isolated",
+        "domain": company_domain,
+        "forager_org_id": forager_org_id,
+        "titles_with_people": len(nonzero),
+        "people_scanned": people_scanned,
+        "buyer_committee_matches": matches_found,
+        "contacts_created_or_linked": created_count,
+        "new_contacts_to_reveal": new_count,
+        "discovery_search_credits": search_credits,  # title totals were free; only paged searches cost
+        "estimated_reveal_credits": est_reveal_credits,
+        "max_contacts": max_contacts,
+        "stop_reason": stop_reason,
+    }
+    logger.info(
+        "Discovery(title) %s org=%s: titles_with_people=%d scanned=%d matched=%d created=%d "
+        "search_credits=%d est_reveal_credits=~%d (%d new x ~%d) cap=%d stop=%r",
+        company_domain, forager_org_id, len(nonzero), people_scanned, matches_found,
+        created_count, search_credits, est_reveal_credits, new_count, EST_CREDITS_PER_REVEAL,
+        max_contacts, stop_reason,
+    )
+    results.append({"diagnostic": diagnostic})
+    return results
+
+
+def _discover_by_domain_pagination(
+    hubspot_company_id: str,
+    company_domain: str,
+    job_title_filter: str | None,
+    max_contacts: int,
+    needed: int,
+    seen_person_ids: set,
+    owner_id,
+    results: list,
+) -> list:
+    """Fallback: the original domain-wide pagination (scan everyone, filter titles
+    locally). Used only when the parent org id can't be resolved. Note this sweeps in
+    same-domain subsidiaries and is windowed by Forager — the org-isolated title method
+    above is preferred."""
+    page = 0
+    MAX_PAGES = 300
+    people_scanned = 0
+    matches_found = 0
+    total_available = None
     stop_reason = "reached max_contacts (cap filled)"
     while needed > 0 and page < MAX_PAGES:
-        # Fetch the broad set of current people (no Forager-side title filter) so
-        # we can apply the full buyer-committee list locally.
         roles, total = forager.find_contacts_at_company_with_total(company_domain, page=page)
         if total is not None:
             total_available = total
@@ -297,64 +443,25 @@ def discover_and_create_contacts(
                 break
             people_scanned += 1
             role_title = role.get("role_title") or ""
-            # Title gate (free, local): only buyer-committee titles are created.
             if not buyer_committee.matches_buyer_committee(role_title):
                 continue
             matches_found += 1
             if job_title_filter and job_title_filter.lower() not in role_title.lower():
                 continue
-            person = role.get("person") or {}
-            person_id = person.get("id")
-            pid = str(person_id) if person_id else ""
-            if pid and pid in seen_person_ids:
-                continue  # already on this company (this run or a previous delivery)
-            if pid:
-                seen_person_ids.add(pid)
-
-            # Skeleton fields only — NO email/phone reveal here (no credits). The
-            # empty email/phone are dropped by HubSpot's clean step; the contact
-            # carries forager_person_id (for dedup) but NOT forager_enriched.
-            fields = forager.parse_person_fields(role, [], [])
-            if owner_id:
-                fields["hubspot_owner_id"] = owner_id
-
-            # Cross-company dedup (free HubSpot search): if this person already
-            # exists as a contact, just associate them — don't create a duplicate
-            # and don't re-trigger a reveal.
-            existing = hubspot.find_contact_by_person_id(pid) if pid else None
-            if existing:
-                contact_id = existing["id"]
-                action = "exists"
-            else:
-                created = hubspot.create_contact(fields)
-                contact_id = created["id"]
-                action = "discovered"
-
-            try:
-                hubspot.associate_contact_to_company(contact_id, hubspot_company_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Association failed for contact %s: %s", contact_id, exc)
-
+            res = _create_skeleton_from_role(role, hubspot_company_id, owner_id, seen_person_ids)
+            if res is None:
+                continue
+            results.append(res)
             needed -= 1
-            results.append({
-                "contact_id": contact_id,
-                "name": f"{fields.get('firstname', '')} {fields.get('lastname', '')}".strip(),
-                "title": fields.get("jobtitle"),
-                "action": action,
-            })
 
-    # If the loop ended because we exhausted MAX_PAGES (not an empty page and not
-    # a filled cap), say so — that's the signal to raise MAX_PAGES.
     if needed > 0 and page >= MAX_PAGES:
         stop_reason = f"hit page cap ({MAX_PAGES}) — more people likely remain; raise MAX_PAGES"
 
     created_count = sum(1 for r in results if r.get("contact_id"))
-    # Only brand-new skeletons ("discovered") trigger a paid reveal in Workflow 2;
-    # "exists" links re-use an existing contact and cost nothing more. Discovery
-    # itself spends 0 credits — est_reveal_credits is a forecast of the spend to come.
     new_count = sum(1 for r in results if r.get("action") == "discovered")
     est_reveal_credits = new_count * EST_CREDITS_PER_REVEAL
     diagnostic = {
+        "method": "domain_pagination_fallback",
         "domain": company_domain,
         "forager_total_people": total_available,
         "people_scanned": people_scanned,
@@ -368,18 +475,17 @@ def discover_and_create_contacts(
         "stop_reason": stop_reason,
     }
     logger.info(
-        "Discovery %s: total_people=%s scanned=%d pages=%d matched=%d created=%d "
-        "discovery_credits=0 est_reveal_credits=~%d (%d new x ~%d) cap=%d stop=%r",
+        "Discovery(domain-fallback) %s: total_people=%s scanned=%d pages=%d matched=%d "
+        "created=%d est_reveal_credits=~%d cap=%d stop=%r",
         company_domain, total_available, people_scanned, page, matches_found,
-        created_count, est_reveal_credits, new_count, EST_CREDITS_PER_REVEAL,
-        max_contacts, stop_reason,
+        created_count, est_reveal_credits, max_contacts, stop_reason,
     )
     results.append({"diagnostic": diagnostic})
     return results
 
 
 def handle_company_webhook(hubspot_company_id: str, job_title_filter: str | None = None,
-                           max_contacts: int = 50, force: bool = False) -> dict:
+                           max_contacts: int = 10, force: bool = False) -> dict:
     """Workflow 1 (company-created): enrich the company, then DISCOVER buyer-committee
     contacts as skeletons. It does NOT enrich them here — creating each skeleton fires
     the contact-created webhook, which runs Workflow 2 to reveal email/phone. This is
@@ -389,11 +495,15 @@ def handle_company_webhook(hubspot_company_id: str, job_title_filter: str | None
         return company_result
 
     company_domain = company_result.get("domain", "") or ""
+    # The parent org id resolved during enrichment is what isolates the MAIN company
+    # from its same-domain subsidiaries in title-bucketed discovery.
+    forager_org_id = company_result.get("forager_org_id") or None
     discovered_contacts = []
-    if company_domain:
+    if company_domain or forager_org_id:
         discovered_contacts = discover_and_create_contacts(
             hubspot_company_id=hubspot_company_id,
             company_domain=company_domain,
+            forager_org_id=forager_org_id,
             job_title_filter=job_title_filter,
             max_contacts=max_contacts,
         )

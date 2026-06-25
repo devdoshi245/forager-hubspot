@@ -290,6 +290,54 @@ def find_contacts_at_company_with_total(organization_domain: str, page: int = 0)
     return (data or {}).get("search_results", []), (data or {}).get("total_search_results")
 
 
+# ---------------------------------------------------------------------------
+# TITLE-BUCKETED, PARENT-ORG-ISOLATED people search
+#
+# Two facts verified against the live API drive this:
+#   1. Filtering by `organization_domains:[kpmg.com]` sweeps in ALL ~92 KPMG
+#      member firms (170k people). Filtering by `organizations:[<parent org id>]`
+#      isolates the ONE main entity (59k for KPMG). Subsidiaries share the domain
+#      but differ by org id / LinkedIn handle, so the org id is the only thing that
+#      excludes them.
+#   2. `person_role_search` is windowed at ~500 results (10/page) and `role_title`
+#      is a fuzzy keyword filter, so we search per exact title and re-confirm hits
+#      locally. The `/totals/` variant returns the true count for FREE (0 credits),
+#      so we use it to skip titles that have nobody before spending a search credit.
+# ---------------------------------------------------------------------------
+def role_title_totals(organization_id, role_title: str) -> int:
+    """FREE count of current people holding `role_title` at ONE organization (the
+    PARENT org id, so same-domain subsidiaries are excluded). 0 credits. Returns 0
+    on no match or error (the totals endpoint returns null totals for empty filters)."""
+    if not organization_id:
+        return 0
+    try:
+        data = _post("datastorage/person_role_search/totals/", {
+            "organizations": [int(organization_id)],
+            "role_title": role_title,
+            "role_is_current": True,
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("role_title_totals(%s, %r) failed: %s", organization_id, role_title, exc)
+        return 0
+    n = (data or {}).get("total_persons")
+    return n if isinstance(n, int) else 0
+
+
+def find_contacts_by_role_title(organization_id, role_title: str, page: int = 0) -> tuple[list[dict], int | None]:
+    """Find current people holding `role_title` at ONE organization (PARENT org id —
+    excludes same-domain subsidiaries). 1 credit per page. Returns (role records,
+    total_search_results). role_title is a fuzzy server filter; the caller re-confirms
+    each hit with buyer_committee.matches_buyer_committee."""
+    payload = {
+        "page": page,
+        "organizations": [int(organization_id)],
+        "role_title": role_title,
+        "role_is_current": True,
+    }
+    data = _post("datastorage/person_role_search/", payload)
+    return (data or {}).get("search_results", []), (data or {}).get("total_search_results")
+
+
 def _role_person_slug(role: dict) -> str:
     return (((role.get("person") or {}).get("linkedin_info") or {}).get("public_identifier") or "").lower()
 

@@ -190,3 +190,10 @@ def matches_buyer_committee(title: str | None) -> bool:
             return True
 
     return False
+
+
+def committee_titles() -> list[str]:
+    """The exact buyer-committee title strings, deduped, in their declared (priority)
+    order. Used as server-side Forager ``role_title`` keywords for title-bucketed
+    people search — each title becomes one 'find people with exactly this title' query."""
+    return list(dict.fromkeys(_TITLES))
