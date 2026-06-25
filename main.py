@@ -49,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.23 (discovery: title-bucketed + parent-org-isolated people search by exact buyer-committee title; excludes same-domain subsidiaries; default cap 10)"
+BUILD = "v3.24 (discovery: STRICT exact-title match (matches_buyer_committee_exact) re-confirms hits; role_title sent as quoted phrase so multi-word titles work; title-bucketed + parent-org-isolated; priority order; cap 10)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 

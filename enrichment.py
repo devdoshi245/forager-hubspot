@@ -345,22 +345,30 @@ def discover_and_create_contacts(
     if job_title_filter:
         titles = [t for t in titles if job_title_filter.lower() in t.lower()]
 
-    # FREE pre-filter: which exact titles actually have people at the parent org? (0 credits)
-    title_counts = [(t, forager.role_title_totals(forager_org_id, t)) for t in titles]
-    nonzero = sorted([(t, n) for t, n in title_counts if n > 0], key=lambda x: -x[1])
-
+    # Walk titles in committee PRIORITY order (decision makers -> champions ->
+    # influencers, the order in committee_titles()) and INTERLEAVE the free totals
+    # pre-check with the paid search, breaking the instant the cap fills. This avoids
+    # the ~138-call upfront totals sweep: for a real ICP the first few senior titles
+    # fill the cap, so we make only a handful of calls. (A company with few committee
+    # people still falls through all 138 free totals — correct, just slower.)
     search_credits = 0
+    totals_calls = 0
+    titles_with_people = 0
     people_scanned = 0
     matches_found = 0
     stop_reason = "reached max_contacts (cap filled)"
 
-    for title, _count in nonzero:
+    for title in titles:
         if needed <= 0:
             break
+        totals_calls += 1
+        if forager.role_title_totals(forager_org_id, title) <= 0:  # FREE skip of empty titles
+            continue
+        titles_with_people += 1
         page = 0
         while needed > 0 and page < _MAX_PAGES_PER_TITLE:
             roles, _total = forager.find_contacts_by_role_title(forager_org_id, title, page=page)
-            search_credits += 1  # person_role_search = 1 credit/page (the totals above were free)
+            search_credits += 1  # person_role_search = 1 credit/page (totals checks are free)
             page += 1
             if not roles:
                 break
@@ -368,8 +376,10 @@ def discover_and_create_contacts(
                 if needed <= 0:
                     break
                 people_scanned += 1
-                # role_title is a fuzzy server filter — re-confirm against the committee.
-                if not buyer_committee.matches_buyer_committee(role.get("role_title") or ""):
+                # role_title is a fuzzy phrase filter (matches any title CONTAINING the
+                # phrase) — re-confirm with STRICT exact-title equality so we only create
+                # people who genuinely hold a buyer-committee title.
+                if not buyer_committee.matches_buyer_committee_exact(role.get("role_title") or ""):
                     continue
                 res = _create_skeleton_from_role(role, hubspot_company_id, owner_id, seen_person_ids)
                 if res is None:
@@ -389,7 +399,8 @@ def discover_and_create_contacts(
         "method": "title_bucketed_org_isolated",
         "domain": company_domain,
         "forager_org_id": forager_org_id,
-        "titles_with_people": len(nonzero),
+        "titles_checked": totals_calls,
+        "titles_with_people": titles_with_people,
         "people_scanned": people_scanned,
         "buyer_committee_matches": matches_found,
         "contacts_created_or_linked": created_count,
@@ -400,9 +411,9 @@ def discover_and_create_contacts(
         "stop_reason": stop_reason,
     }
     logger.info(
-        "Discovery(title) %s org=%s: titles_with_people=%d scanned=%d matched=%d created=%d "
-        "search_credits=%d est_reveal_credits=~%d (%d new x ~%d) cap=%d stop=%r",
-        company_domain, forager_org_id, len(nonzero), people_scanned, matches_found,
+        "Discovery(title) %s org=%s: titles_checked=%d titles_with_people=%d scanned=%d matched=%d "
+        "created=%d search_credits=%d est_reveal_credits=~%d (%d new x ~%d) cap=%d stop=%r",
+        company_domain, forager_org_id, totals_calls, titles_with_people, people_scanned, matches_found,
         created_count, search_credits, est_reveal_credits, new_count, EST_CREDITS_PER_REVEAL,
         max_contacts, stop_reason,
     )
@@ -443,7 +454,7 @@ def _discover_by_domain_pagination(
                 break
             people_scanned += 1
             role_title = role.get("role_title") or ""
-            if not buyer_committee.matches_buyer_committee(role_title):
+            if not buyer_committee.matches_buyer_committee_exact(role_title):
                 continue
             matches_found += 1
             if job_title_filter and job_title_filter.lower() not in role_title.lower():

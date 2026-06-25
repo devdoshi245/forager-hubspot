@@ -304,16 +304,28 @@ def find_contacts_at_company_with_total(organization_domain: str, page: int = 0)
 #      locally. The `/totals/` variant returns the true count for FREE (0 credits),
 #      so we use it to skip titles that have nobody before spending a search credit.
 # ---------------------------------------------------------------------------
+def _quote_phrase(role_title: str) -> str:
+    """Wrap a role_title in double quotes so Forager's boolean text-search matches it as
+    an EXACT PHRASE. An unquoted multi-word value (e.g. ``Product Manager``) is parsed as
+    a boolean expression — it 400s ('unknown operation') on /totals/ and behaves as a
+    boolean-AND on search — so quoting is REQUIRED for multi-word titles, and harmless
+    for single words (``"COO"`` returns the same count as ``COO``). Any internal quotes
+    are stripped first so the phrase can't break out."""
+    t = (role_title or "").replace('"', "").strip()
+    return f'"{t}"' if t else t
+
+
 def role_title_totals(organization_id, role_title: str) -> int:
-    """FREE count of current people holding `role_title` at ONE organization (the
-    PARENT org id, so same-domain subsidiaries are excluded). 0 credits. Returns 0
-    on no match or error (the totals endpoint returns null totals for empty filters)."""
+    """FREE count of current people whose title contains `role_title` (as an exact
+    phrase) at ONE organization (the PARENT org id, so same-domain subsidiaries are
+    excluded). 0 credits. Returns 0 on no match or error (the totals endpoint returns
+    null totals for empty filters)."""
     if not organization_id:
         return 0
     try:
         data = _post("datastorage/person_role_search/totals/", {
             "organizations": [int(organization_id)],
-            "role_title": role_title,
+            "role_title": _quote_phrase(role_title),
             "role_is_current": True,
         })
     except Exception as exc:  # noqa: BLE001
@@ -324,14 +336,16 @@ def role_title_totals(organization_id, role_title: str) -> int:
 
 
 def find_contacts_by_role_title(organization_id, role_title: str, page: int = 0) -> tuple[list[dict], int | None]:
-    """Find current people holding `role_title` at ONE organization (PARENT org id —
-    excludes same-domain subsidiaries). 1 credit per page. Returns (role records,
-    total_search_results). role_title is a fuzzy server filter; the caller re-confirms
-    each hit with buyer_committee.matches_buyer_committee."""
+    """Find current people whose title contains `role_title` (matched as an exact
+    phrase) at ONE organization (PARENT org id — excludes same-domain subsidiaries).
+    1 credit per page. Returns (role records, total_search_results). The phrase filter
+    is still loose (it matches any title CONTAINING the phrase, e.g. "Assistant Product
+    Manager"), so the caller re-confirms each hit with
+    buyer_committee.matches_buyer_committee_exact."""
     payload = {
         "page": page,
         "organizations": [int(organization_id)],
-        "role_title": role_title,
+        "role_title": _quote_phrase(role_title),
         "role_is_current": True,
     }
     data = _post("datastorage/person_role_search/", payload)

@@ -197,3 +197,82 @@ def committee_titles() -> list[str]:
     order. Used as server-side Forager ``role_title`` keywords for title-bucketed
     people search — each title becomes one 'find people with exactly this title' query."""
     return list(dict.fromkeys(_TITLES))
+
+
+# ---------------------------------------------------------------------------
+# STRICT EXACT-TITLE buyer-committee matcher.
+#
+# A person matches a buyer-committee title ONLY if their job title IS that title
+# exactly (after the existing _normalize_words), NEVER merely "contains" the
+# committee token. This fixes the fuzzy-role_title bug where, under role_title="COO"
+# at KPMG, Forager returned and the OLD matches_buyer_committee accepted noise like
+# "Manager - COO's Office", "Global People COO", "CFO/COO Management Consulting",
+# "Senior Executive Assistant - Global COO Team", "Director - Chairman & COO Office".
+#
+# Reuses the existing _normalize_words (so CPO==CPO, "Vice President, Product"==
+# "Vice President Product", sr->senior, svp/evp->vp, "of"/"the"/"and"/"&" dropped)
+# and the existing _COMMITTEE list of normalized title tuples. Because _TITLES
+# already enumerates BOTH the abbreviation and the spelled-out form of every
+# committee title, exact-equality against the SET of normalized committee tuples
+# covers every legitimate spelling — there is no substring / contiguous-run path,
+# which is exactly what let the noise through before.
+#
+# DESIGN DECISION (compound exec titles): YES — a clean exact SEGMENT counts.
+# Compound exec titles joined by a co-equal-role connector (&, /, +, |, ;, "and",
+# "or") — e.g. "CEO & Founder", "CTO/COO", "Co-Founder & CEO", "EVP & CTO",
+# "President/CEO" — match when ANY WHOLE connector-split segment is itself exactly a
+# committee title. Strictness holds because the match is WHOLE-SEGMENT, not
+# substring: role-noise stays glued to its own segment, so "Global People COO"
+# (no connector -> the single tuple ('global','people','coo')) and "CFO/COO
+# Management Consulting" (-> ('cfo',) + ('coo','management','consulting')) both fail.
+# We split the RAW title, NOT the normalized words, because _normalize_words turns
+# '&'/'and' into a dropped stopword and '/' into a space, which would dissolve the
+# segment boundary and reintroduce the substring bug. '-' and ',' are deliberately
+# NOT connectors: they separate a title from an org/department descriptor
+# ("Manager - COO's Office", "Vice President, Product") rather than joining two
+# co-equal roles, so they are handled only by the whole-title equality test (which
+# correctly rejects the former and accepts the latter).
+# ---------------------------------------------------------------------------
+
+# Set of normalized committee title tuples — O(1) exact membership is the whole
+# strictness guarantee. Built from the already-computed _COMMITTEE.
+_COMMITTEE_SET: frozenset[tuple[str, ...]] = frozenset(_COMMITTEE)
+
+# Connectors that join INDEPENDENT, co-equal role titles in a compound exec title.
+# We split the RAW title on these and test each side as its own exact title.
+_COMPOUND_CONNECTOR_RE = re.compile(r"\s*(?:&|/|\+|\||;|\band\b|\bor\b)\s*", re.IGNORECASE)
+
+
+def matches_buyer_committee_exact(title: str | None) -> bool:
+    """STRICT: is this job title EXACTLY a buyer-committee title (after normalization)?
+
+    Accepts only when the WHOLE normalized title equals a committee title, or — for
+    compound exec titles joined by a co-equal-role connector (&, /, +, |, ;, "and",
+    "or") — when a WHOLE connector-split segment equals a committee title exactly. A
+    segment carrying any extra word (e.g. "Global People COO") never matches the bare
+    "COO". This is the strict replacement for the fuzzy ``matches_buyer_committee``:
+    use it to re-confirm fuzzy ``role_title`` hits so Forager reveal credits are spent
+    only on people who genuinely hold a buyer-committee title.
+    """
+    if not title:
+        return False
+
+    # (1) Whole-title exact equality — the clean single-role case ("COO",
+    #     "Vice President, Product"). Runs FIRST, which also preserves committee
+    #     titles that themselves contain a connector char, e.g. "Head of Trust &
+    #     Safety" (-> ('head','trust','safety')), before the split would shatter them.
+    if tuple(_normalize_words(title)) in _COMMITTEE_SET:
+        return True
+
+    # (2) Compound exec titles: split the RAW title on connectors and require a
+    #     WHOLE segment to be exactly a committee title. Only attempted when a real
+    #     connector is present, so single-segment noise titles ("Interim COO",
+    #     "Manager - COO's Office") are never given a second chance.
+    segments = _COMPOUND_CONNECTOR_RE.split(title)
+    if len(segments) > 1:
+        for seg in segments:
+            seg_words = tuple(_normalize_words(seg))
+            if seg_words and seg_words in _COMMITTEE_SET:
+                return True
+
+    return False
