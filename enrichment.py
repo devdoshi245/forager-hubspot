@@ -193,20 +193,25 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
                 "duplicate_of": dup.get("id"),
             }
 
-    # (4) Reveal email + phone (THIS spends Forager credits).
-    emails = forager.get_person_emails(person_id=person_id, linkedin_identifier=slug)
+    # (4) Reveal email + phone (THIS spends Forager credits). Work and personal emails
+    # are pulled separately so we can route work -> standard `email`, personal -> `migrated_emails_home`.
+    personal_emails, work_emails = forager.get_person_emails_split(person_id=person_id, linkedin_identifier=slug)
     phones = forager.get_person_phones(person_id=person_id, linkedin_identifier=slug)
 
     # (5) Build the write. A manual contact gets its full profile from `role`; a
     # discovered skeleton already has its profile, so we only add the revealed
     # contact details. Either way, stamp forager_enriched so we never re-spend.
     if role:
-        fields = forager.parse_person_fields(role, emails, phones)
+        fields = forager.parse_person_fields(role, personal_emails, work_emails, phones)
     else:
         fields = {}
-        if emails:
-            fields["migrated_emails_home"] = emails[0]
-            fields["all_emails"] = ", ".join(emails)
+        union = list(dict.fromkeys(work_emails + personal_emails))
+        if work_emails:                       # WORK email -> standard `email`
+            fields["email"] = work_emails[0]
+        if personal_emails:                   # PERSONAL email -> "Email (home)"
+            fields["migrated_emails_home"] = personal_emails[0]
+        if union:
+            fields["all_emails"] = ", ".join(union)
         if phones:
             fields["phone"] = phones[0]
             fields["all_phones"] = ", ".join(phones)
@@ -216,14 +221,15 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
 
     hubspot.update_contact(hubspot_contact_id, fields)
     logger.info(
-        "Enriched contact %s (%s): revealed email/phone, est ~%d Forager credits",
+        "Enriched contact %s (%s): work_email=%d personal_email=%d phone=%d, est ~%d Forager credits",
         hubspot_contact_id, fields.get("company") or props.get("company") or "?",
-        EST_CREDITS_PER_REVEAL,
+        len(work_emails), len(personal_emails), len(phones), EST_CREDITS_PER_REVEAL,
     )
     return {
         "hubspot_contact_id": hubspot_contact_id,
         "status": "enriched",
         "matched_by": "forager_person_id" if not role else "linkedin",
+        "email": fields.get("email"),
         "migrated_emails_home": fields.get("migrated_emails_home"),
         "phone": fields.get("phone"),
         "title": fields.get("jobtitle") or props.get("jobtitle"),
@@ -251,7 +257,7 @@ def _create_skeleton_from_role(role: dict, hubspot_company_id: str, owner_id,
 
     # Skeleton fields only — empty email/phone are dropped by HubSpot's clean step;
     # the contact carries forager_person_id (for dedup) but NOT forager_enriched.
-    fields = forager.parse_person_fields(role, [], [])
+    fields = forager.parse_person_fields(role, [], [], [])  # skeleton only — no email/phone
     if owner_id:
         fields["hubspot_owner_id"] = owner_id
 

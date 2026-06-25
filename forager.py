@@ -478,19 +478,35 @@ def _lookup_body(person_id: int | None, linkedin_identifier: str | None) -> dict
     return None
 
 
-def get_person_emails(person_id: int | None = None, linkedin_identifier: str | None = None) -> list[str]:
-    """Look up personal + work emails. Prefers person_id when available."""
+def get_person_emails_split(person_id: int | None = None,
+                            linkedin_identifier: str | None = None) -> tuple[list[str], list[str]]:
+    """Look up (personal_emails, work_emails) SEPARATELY so the caller can route the
+    WORK email to HubSpot's standard ``email`` field and the PERSONAL email to
+    ``migrated_emails_home`` ('Email (home)'). Returns ([personal], [work]); either may
+    be empty. Prefers person_id when available. 0 credits if Forager has nothing."""
     body = _lookup_body(person_id, linkedin_identifier)
     if body is None:
-        return []
-    emails: list[str] = []
-    for endpoint in ("personal_emails", "work_emails"):
+        return [], []
+
+    def _pull(endpoint: str) -> list[str]:
         try:
             data = _post(f"datastorage/person_contacts_lookup/{endpoint}/", body)
-            emails += [e.get("email") for e in (data or []) if isinstance(e, dict) and e.get("email")]
+            return [e.get("email") for e in (data or []) if isinstance(e, dict) and e.get("email")]
         except Exception as exc:  # noqa: BLE001 - one bad lookup shouldn't kill the rest
             logger.warning("email lookup (%s) failed: %s", endpoint, exc)
-    return list(dict.fromkeys(emails))  # de-duplicate, preserve order
+            return []
+
+    personal = list(dict.fromkeys(_pull("personal_emails")))
+    work = list(dict.fromkeys(_pull("work_emails")))
+    return personal, work
+
+
+def get_person_emails(person_id: int | None = None, linkedin_identifier: str | None = None) -> list[str]:
+    """Union of work + personal emails (work first), de-duplicated. Prefer
+    ``get_person_emails_split`` when you need to route work vs personal to different
+    HubSpot fields."""
+    personal, work = get_person_emails_split(person_id, linkedin_identifier)
+    return list(dict.fromkeys(work + personal))
 
 
 def get_person_phones(person_id: int | None = None, linkedin_identifier: str | None = None) -> list[str]:
@@ -527,8 +543,12 @@ def _location_parts(location: dict | None) -> dict:
     return parts
 
 
-def parse_person_fields(role: dict, emails: list, phones: list) -> dict:
-    """Flatten a Forager role record (+ contacts) into HubSpot contact properties."""
+def parse_person_fields(role: dict, personal_emails: list, work_emails: list, phones: list) -> dict:
+    """Flatten a Forager role record (+ contacts) into HubSpot contact properties.
+
+    Email routing (per the partner's choice): the WORK email -> HubSpot's standard
+    ``email`` field (what reps/sequencers read), the PERSONAL email -> ``migrated_emails_home``
+    ('Email (home)'). ``all_emails`` keeps the de-duplicated union (work first)."""
     if not role:
         return {}
     person = role.get("person") or {}
@@ -537,13 +557,16 @@ def parse_person_fields(role: dict, emails: list, phones: list) -> dict:
     org_li = org.get("linkedin_info") or {}
     location = _location_parts(person.get("location"))
     skills = [s.get("name", "") for s in (person.get("skills") or []) if s.get("name")]
+    personal_emails = personal_emails or []
+    work_emails = work_emails or []
+    union = list(dict.fromkeys(work_emails + personal_emails))
     return {
         "firstname": person.get("first_name", "") or "",
         "lastname": person.get("last_name", "") or "",
         "jobtitle": role.get("role_title", "") or "",
-        # Personal email -> HubSpot's migrated "Email (home)" field (internal name
-        # migrated_emails_home). The built-in `email` stays empty (reserved).
-        "migrated_emails_home": emails[0] if emails else "",
+        # WORK email -> standard `email`; PERSONAL email -> "Email (home)" (migrated_emails_home).
+        "email": work_emails[0] if work_emails else "",
+        "migrated_emails_home": personal_emails[0] if personal_emails else "",
         "phone": phones[0] if phones else "",
         "city": location["city"],
         "state": location["state"],
@@ -557,6 +580,6 @@ def parse_person_fields(role: dict, emails: list, phones: list) -> dict:
         "person_headline": person.get("headline", "") or "",
         "person_skills": ", ".join(skills[:10]),
         "forager_person_id": str(person.get("id", "")),
-        "all_emails": ", ".join(emails),
+        "all_emails": ", ".join(union),
         "all_phones": ", ".join(phones),
     }

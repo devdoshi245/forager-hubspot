@@ -49,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.24 (discovery: STRICT exact-title match (matches_buyer_committee_exact) re-confirms hits; role_title sent as quoted phrase so multi-word titles work; title-bucketed + parent-org-isolated; priority order; cap 10)"
+BUILD = "v3.25 (email routing: WORK email -> standard `email`, PERSONAL -> `migrated_emails_home` (Email home); split work/personal lookup; 409 unique-email conflict tolerated. + v3.24 strict exact-title + quoted role_title)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
