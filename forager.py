@@ -577,10 +577,8 @@ def parse_person_fields(role: dict, personal_emails: list, work_emails: list, ph
         "firstname": person.get("first_name", "") or "",
         "lastname": person.get("last_name", "") or "",
         "jobtitle": role.get("role_title", "") or "",
-        # WORK email -> standard `email` AND dedicated `work_email`; PERSONAL email ->
-        # "Emails (home)" (migrated_emails_home).
+        # WORK email -> standard `email`; PERSONAL email -> "Email (home)" (migrated_emails_home).
         "email": work_emails[0] if work_emails else "",
-        "work_email": work_emails[0] if work_emails else "",
         "migrated_emails_home": personal_emails[0] if personal_emails else "",
         "phone": phones[0] if phones else "",
         "city": location["city"],
