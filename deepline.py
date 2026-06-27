@@ -273,21 +273,29 @@ def _coerce_phone(val) -> str | None:
 # field tuning is verified on the first live run (when BYOK keys + credits exist).
 # ---------------------------------------------------------------------------
 def _identity(inp: dict, extra: dict | None = None) -> dict:
+    """Build a provider payload that covers EVERY field-name variant the Deepline doc
+    uses across providers (snake_case, camelCase, and provider-specific names like
+    `linkedinProfileUrl`, `profile_url`, `domainOrCompany`). Providers ignore keys
+    they don't use, so sending all variants maximises match rate without harm."""
     first = inp.get("first_name") or ""
     last = inp.get("last_name") or ""
     full = (inp.get("full_name") or f"{first} {last}").strip()
     domain = inp.get("domain") or ""
+    company = inp.get("company_name") or ""
+    li = inp.get("linkedin_url") or ""
     payload = {
-        "first_name": first,
-        "last_name": last,
-        "full_name": full,
-        "name": full,
-        "domain": domain,
-        "company_domain": domain,
-        "companyDomain": domain,            # some providers (Crustdata, Upcell) use camelCase
-        "company_name": inp.get("company_name") or "",
-        "linkedin_url": inp.get("linkedin_url") or "",
-        "linkedinUrl": inp.get("linkedin_url") or "",  # camelCase alias
+        # name
+        "first_name": first, "last_name": last,
+        "full_name": full, "fullName": full, "name": full,
+        # company domain (snake / camel / icypeas' domainOrCompany)
+        "domain": domain, "company_domain": domain, "companyDomain": domain,
+        "domainOrCompany": domain or company,
+        # company name
+        "company": company, "company_name": company,
+        # linkedin (every variant the doc shows: leadmagic profile_url, crustdata
+        # linkedinProfileUrl, contactout/lusha linkedin_url, etc.)
+        "linkedin_url": li, "linkedinUrl": li, "linkedinProfileUrl": li,
+        "profile_url": li, "profile": li,
     }
     if inp.get("email"):
         payload["email"] = inp["email"]
