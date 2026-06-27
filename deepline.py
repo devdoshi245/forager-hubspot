@@ -62,7 +62,20 @@ _PHONE_RE = re.compile(r"\+?\d[\d\s().\-]{6,}\d")
 # until then these sensible defaults (cheap + synchronous first) apply.
 # ---------------------------------------------------------------------------
 _DEFAULT_EMAIL_ORDER = ["hunter", "leadmagic", "prospeo", "contactout", "pdl", "crustdata", "lusha"]
-_DEFAULT_PHONE_ORDER = ["leadmagic", "contactout", "lusha", "pdl", "prospeo"]
+
+# Phone enrichment is REGION-AWARE: the tool order depends on where the contact is.
+# These defaults come from Shirish's email (client's list still pending final sign-off),
+# and each region can be overridden via env, e.g.:
+#   DEEPLINE_PHONE_ORDER_NAMER="upcell,pdl,findymail,wiza,prospeo"
+_DEFAULT_PHONE_ORDER_BY_REGION = {
+    "namer":  ["upcell", "pdl", "findymail", "wiza", "prospeo"],
+    "europe": ["prospeo", "wiza", "datagma", "pdl", "contactout"],
+    "mea":    ["pdl", "wiza", "prospeo", "datagma", "contactout"],
+    "apac":   ["pdl", "wiza", "prospeo", "leadmagic", "findymail"],
+    "latam":  ["pdl", "wiza", "datagma", "prospeo", "findymail"],
+}
+# Used when a contact's country can't be mapped to a region.
+_DEFAULT_PHONE_ORDER_FALLBACK = ["pdl", "wiza", "prospeo", "contactout"]
 
 
 def _order(env_name: str, default: list) -> list:
@@ -70,6 +83,49 @@ def _order(env_name: str, default: list) -> list:
     if not raw:
         return default
     return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def _phone_order_for_region(region: str) -> list:
+    """Tool order for a region — env override (DEEPLINE_PHONE_ORDER_<REGION>) wins."""
+    default = _DEFAULT_PHONE_ORDER_BY_REGION.get(region, _DEFAULT_PHONE_ORDER_FALLBACK)
+    return _order(f"DEEPLINE_PHONE_ORDER_{region.upper()}", default)
+
+
+# Country -> region. Lower-cased exact match on the contact's country string.
+# (Kept compact: the common countries per region; unknowns fall back to "fallback".)
+_REGION_BY_COUNTRY = {
+    # NAMER
+    "united states": "namer", "usa": "namer", "us": "namer", "u.s.": "namer",
+    "u.s.a.": "namer", "america": "namer", "canada": "namer",
+    # EUROPE
+    "united kingdom": "europe", "uk": "europe", "england": "europe", "scotland": "europe",
+    "ireland": "europe", "germany": "europe", "france": "europe", "spain": "europe",
+    "portugal": "europe", "italy": "europe", "netherlands": "europe", "belgium": "europe",
+    "switzerland": "europe", "austria": "europe", "sweden": "europe", "norway": "europe",
+    "denmark": "europe", "finland": "europe", "poland": "europe", "czech republic": "europe",
+    "czechia": "europe", "romania": "europe", "greece": "europe", "hungary": "europe",
+    "ukraine": "europe",
+    # MEA (Middle East + Africa)
+    "united arab emirates": "mea", "uae": "mea", "saudi arabia": "mea", "qatar": "mea",
+    "kuwait": "mea", "bahrain": "mea", "oman": "mea", "israel": "mea", "turkey": "mea",
+    "egypt": "mea", "south africa": "mea", "nigeria": "mea", "kenya": "mea", "morocco": "mea",
+    # APAC
+    "india": "apac", "china": "apac", "japan": "apac", "south korea": "apac", "korea": "apac",
+    "singapore": "apac", "australia": "apac", "new zealand": "apac", "indonesia": "apac",
+    "malaysia": "apac", "thailand": "apac", "vietnam": "apac", "philippines": "apac",
+    "hong kong": "apac", "taiwan": "apac", "pakistan": "apac", "bangladesh": "apac",
+    # LATAM
+    "mexico": "latam", "brazil": "latam", "argentina": "latam", "chile": "latam",
+    "colombia": "latam", "peru": "latam", "uruguay": "latam", "costa rica": "latam",
+    "panama": "latam", "ecuador": "latam",
+}
+
+
+def _region_for_country(country: str | None) -> str:
+    """Map a contact's country to a phone-waterfall region. Returns the region key, or
+    'fallback' when unknown (which uses the fallback order and skips phone validation)."""
+    c = (country or "").strip().lower()
+    return _REGION_BY_COUNTRY.get(c, "fallback")
 
 
 def is_enabled() -> bool:
@@ -228,8 +284,10 @@ def _identity(inp: dict, extra: dict | None = None) -> dict:
         "name": full,
         "domain": domain,
         "company_domain": domain,
+        "companyDomain": domain,            # some providers (Crustdata, Upcell) use camelCase
         "company_name": inp.get("company_name") or "",
         "linkedin_url": inp.get("linkedin_url") or "",
+        "linkedinUrl": inp.get("linkedin_url") or "",  # camelCase alias
     }
     if inp.get("email"):
         payload["email"] = inp["email"]
@@ -275,11 +333,17 @@ _EMAIL_ADAPTERS = {
 
 
 # --- PHONE finder adapters: each returns a candidate phone or None ---
+# NOTE: the exact tool IDs/payloads for the newer providers (upcell, findymail, wiza,
+# datagma) are best-effort from the Deepline docs and confirmed on the first live run.
 def _phone_leadmagic(inp):    return _extract_phone(execute_tool("leadmagic_mobile_finder", _identity(inp)))
 def _phone_contactout(inp):   return _extract_phone(execute_tool("contactout_enrich_person", _identity(inp, {"include": ["phone"]})))
 def _phone_lusha(inp):        return _extract_phone(execute_tool("lusha_enrich_person", _identity(inp, {"reveal_phones": True})))
 def _phone_pdl(inp):          return _extract_phone(execute_tool("peopledatalabs_enrich_contact", _identity(inp)))
 def _phone_prospeo(inp):      return _extract_phone(execute_tool("prospeo_enrich_person", _identity(inp, {"enrich_mobile": True})))
+def _phone_upcell(inp):       return _extract_phone(execute_tool("upcell_enrich_contact", _identity(inp, {"fields": ["mobile"]})))
+def _phone_datagma(inp):      return _extract_phone(execute_tool("datagma_search_phone_numbers", _identity(inp)))
+def _phone_wiza(inp):         return _extract_phone(execute_tool("wiza_reveal_person", _identity(inp)))
+def _phone_findymail(inp):    return _extract_phone(execute_tool("findymail_find_phone", _identity(inp)))
 
 
 def _phone_fullenrich(inp):
@@ -294,6 +358,8 @@ def _phone_fullenrich(inp):
 _PHONE_ADAPTERS = {
     "leadmagic": _phone_leadmagic, "contactout": _phone_contactout, "lusha": _phone_lusha,
     "pdl": _phone_pdl, "prospeo": _phone_prospeo, "fullenrich": _phone_fullenrich,
+    "upcell": _phone_upcell, "datagma": _phone_datagma, "wiza": _phone_wiza,
+    "findymail": _phone_findymail,
 }
 
 
@@ -309,27 +375,29 @@ def validate_email(email: str) -> dict:
     return {"valid": status == "valid", "status": status or "unknown", "smtp_provider": smtp}
 
 
-def validate_phone(phone: str, name: str) -> dict:
-    """Trestle gate. Passes only when valid AND activity_score >= 50. Returns the
-    recorded fields (activity score, line type, country, calling code)."""
+def _phone_validation_enabled() -> bool:
+    """Global off-switch — set DEEPLINE_PHONE_VALIDATION=off to skip phone validation
+    everywhere (Shirish: if Real Contact proves tricky in Deepline, skip it entirely)."""
+    return (os.environ.get("DEEPLINE_PHONE_VALIDATION") or "on").strip().lower() not in ("off", "0", "false", "no")
+
+
+def validate_phone(phone: str, name: str, region: str = "namer") -> dict:
+    """Phone gate per Shirish's call:
+      * Trestle's validity / activity-score are NOT used (deemed unreliable).
+      * ONLY the Trestle 'Real Contact' name-match is used, and ONLY for NAMER.
+        Accept name_match == True OR unknown/'Don't know'; reject ONLY explicit False.
+      * EMEA / APAC / LATAM / unknown regions: NO validation — accept as-is.
+      * If validation is globally off, or Real Contact returns nothing, accept (skip)."""
+    if region != "namer" or not _phone_validation_enabled():
+        return {"valid": True, "validated": False, "region": region}
     data = execute_tool("trestle_real_contact", {"phone": phone, "name": name})
     if data is None:
-        return {"valid": False}
-    status = str(_first(data, ("phone_status", "status", "is_valid")) or "").lower()
-    score = _first(data, ("activity_score",))
-    try:
-        score = int(score)
-    except (TypeError, ValueError):
-        score = None
-    valid_flag = status in ("valid", "true", "active") or _first(data, ("is_valid",)) is True
-    passed = valid_flag and (score is not None and score >= 50)
-    return {
-        "valid": bool(passed),
-        "activity_score": score,
-        "line_type": _first(data, ("line_type", "linetype")),
-        "country": _first(data, ("country_name", "country")),
-        "calling_code": _first(data, ("country_calling_code", "calling_code")),
-    }
+        # "If Real Contact proves tricky in Deepline, skip validation" -> accept.
+        return {"valid": True, "validated": False, "region": region, "note": "real_contact unavailable"}
+    nm = _first(data, ("name_match",))
+    nm_s = str(nm).strip().lower() if nm is not None else ""
+    rejected = (nm is False) or nm_s in ("false", "no", "mismatch", "name.mismatch", "no_match")
+    return {"valid": not rejected, "validated": True, "region": region, "name_match": nm}
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +426,7 @@ def _run_waterfall(order: list, adapters: dict, inp: dict, validate, normalize, 
             # second provider surfaced the same rejected value) -> stop, return blank.
             logger.info("Deepline %s: provider %s repeated a rejected value -> stopping (blank)", channel, key)
             return {}
-        verdict = validate(norm) if channel == "email" else validate(norm, inp.get("full_name") or "")
+        verdict = validate(norm)
         if verdict.get("valid"):
             logger.info("Deepline %s resolved by %s (providers tried=%d)", channel, key, tried)
             return {"value": raw, "meta": verdict, "providers_tried": tried, "winner": key}
@@ -375,35 +443,70 @@ def run_email_waterfall(inp: dict) -> dict:
 
 
 def run_phone_waterfall(inp: dict) -> dict:
+    """Region-aware phone waterfall: the tool ORDER depends on the contact's region
+    (from inp['country']), and validation only runs for NAMER (Trestle name-match)."""
     if not is_enabled() or not (inp.get("first_name") or inp.get("full_name")):
         return {}
-    return _run_waterfall(_order("DEEPLINE_PHONE_ORDER", _DEFAULT_PHONE_ORDER),
-                          _PHONE_ADAPTERS, inp, validate_phone,
-                          lambda p: re.sub(r"\D", "", p), "phone")
+    region = _region_for_country(inp.get("country"))
+    order = _phone_order_for_region(region)
+    name = inp.get("full_name") or ""
+    result = _run_waterfall(order, _PHONE_ADAPTERS, inp,
+                            lambda phone: validate_phone(phone, name, region),
+                            lambda p: re.sub(r"\D", "", p), "phone")
+    if result:
+        result["region"] = region
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Company funding
 # ---------------------------------------------------------------------------
-def get_company_funding(domain: str | None, name: str | None = None) -> str | None:
-    """Return a concise funding summary string for HubSpot's Funding field, or None.
-    Uses LeadMagic's company-funding tool by default (configurable)."""
-    if not is_enabled() or not (domain or name):
+def _parse_money(value) -> float | None:
+    """Best-effort parse of a funding amount into USD float. Handles 12000000,
+    '12,000,000', '$5M', '$1.2B', '500K'."""
+    if value is None:
         return None
-    tool = os.environ.get("DEEPLINE_FUNDING_TOOL") or "leadmagic_company_funding"
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip().lower().replace("$", "").replace(",", "").replace("usd", "").strip()
+    if not s:
+        return None
+    mult = 1.0
+    if s.endswith("k"):
+        mult, s = 1e3, s[:-1]
+    elif s.endswith("m"):
+        mult, s = 1e6, s[:-1]
+    elif s.endswith("b"):
+        mult, s = 1e9, s[:-1]
+    try:
+        return float(s.strip()) * mult
+    except ValueError:
+        return None
+
+
+def get_company_funding(domain: str | None, name: str | None = None) -> dict:
+    """Return {"display": str|None, "amount": float|None} for a company's funding.
+    `display` -> HubSpot Funding field; `amount` (USD) -> the Tier-1 rule. Uses
+    Crustdata by default (per client), configurable via DEEPLINE_FUNDING_TOOL."""
+    if not is_enabled() or not (domain or name):
+        return {"display": None, "amount": None}
+    tool = os.environ.get("DEEPLINE_FUNDING_TOOL") or "crustdata_company_enrichment"
     payload = {}
     if domain:
+        payload["companyDomain"] = domain   # Crustdata uses camelCase
         payload["company_domain"] = domain
         payload["domain"] = domain
     if name:
         payload["company_name"] = name
+        payload["name"] = name
     data = execute_tool(tool, payload)
     if not data:
-        return None
-    total = _first(data, ("total_funding", "total_funding_amount", "funding_total",
-                          "total_raised", "funding"))
+        return {"display": None, "amount": None}
+    total = _first(data, ("total_funding_usd", "total_funding", "total_funding_amount",
+                          "funding_total", "total_raised", "funding_amount", "funding"))
     last_round = _first(data, ("last_funding_type", "latest_round", "last_round", "funding_stage"))
     last_date = _first(data, ("last_funding_date", "latest_funding_date"))
+    amount = _parse_money(total)
     parts = []
     if total:
         parts.append(f"Total: {total}")
@@ -411,8 +514,5 @@ def get_company_funding(domain: str | None, name: str | None = None) -> str | No
         parts.append(f"Last round: {last_round}")
     if last_date:
         parts.append(str(last_date))
-    if parts:
-        return " | ".join(str(p) for p in parts)
-    # Fall back to any human-readable funding text the tool returned.
-    summary = _first(data, ("summary", "description"))
-    return str(summary) if summary else None
+    display = " | ".join(str(p) for p in parts) if parts else _first(data, ("summary", "description"))
+    return {"display": str(display) if display else None, "amount": amount}

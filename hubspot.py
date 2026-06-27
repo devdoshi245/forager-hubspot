@@ -57,6 +57,11 @@ _COMPANY_CUSTOM_PROPS = [
     ("logo_forager_fit", "Logo Forager Fit"),               # HIGH | MEDIUM | LOW
     ("logo_forager_fit_reason", "Logo Forager Fit Reason"),
     ("logo_evidence", "Logo Evidence"),
+    # Tier classification (Tier 1 / Tier 2). Written to the field named by TIER_FIELD
+    # (default "tier"); created here in case it doesn't exist. funding_amount holds the
+    # numeric USD funding (from Deepline/Crustdata) used by the Tier-1 rule.
+    ("tier", "Tier"),
+    ("funding_amount", "Funding Amount (USD)", "number"),
 ]
 _CONTACT_CUSTOM_PROPS = [
     ("linkedin_url", "LinkedIn Profile URL"),
@@ -91,8 +96,8 @@ HOME_EMAIL_PROP = "migrated_emails_home"
 
 _COMPANY_PROPS_TO_READ = (
     "name,domain,description,linkedin_company_page,numberofemployees,"
-    "annualrevenue,founded_year,city,state,country,industry,industry_forager,funding,website,forager_org_id,"
-    "icp_match_score"
+    "annualrevenue,founded_year,city,state,country,industry,industry_forager,funding,funding_amount,website,forager_org_id,"
+    "icp_match_score,tier"
 )
 _CONTACT_PROPS_TO_READ = (
     "firstname,lastname,email,migrated_emails_home,phone,jobtitle,city,state,country,"

@@ -577,8 +577,9 @@ def parse_person_fields(role: dict, personal_emails: list, work_emails: list, ph
         "firstname": person.get("first_name", "") or "",
         "lastname": person.get("last_name", "") or "",
         "jobtitle": role.get("role_title", "") or "",
-        # WORK email -> standard `email`; PERSONAL email -> "Email (home)" (migrated_emails_home).
-        "email": work_emails[0] if work_emails else "",
+        # WORK email is intentionally NOT taken from Forager (client: work email comes
+        # from Deepline only). The built-in `email` is left for Workflow 3 / Deepline.
+        # PERSONAL email -> "Email (home)" (migrated_emails_home).
         "migrated_emails_home": personal_emails[0] if personal_emails else "",
         "phone": phones[0] if phones else "",
         "city": location["city"],

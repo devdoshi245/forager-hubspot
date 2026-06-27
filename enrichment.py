@@ -20,6 +20,7 @@ Capabilities:
 """
 
 import logging
+import os
 
 import buyer_committee
 import deepline
@@ -32,6 +33,30 @@ logger = logging.getLogger(__name__)
 # Rough Forager credit cost to reveal ONE contact's email + phone. Used only for
 # the log estimate below — Forager bills the real amount (~20-25 in practice).
 EST_CREDITS_PER_REVEAL = 25
+
+# Tier-1 thresholds (Shirish's rule).
+_TIER1_MIN_LOGO = 7
+_TIER1_MIN_EMPLOYEES = 100
+_TIER1_MIN_FUNDING = 5_000_000  # USD
+
+
+def _to_float(value) -> float | None:
+    """Coerce a HubSpot/string value to float, or None."""
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _classify_tier(icp_decision, logo_score, employees, funding_amount) -> str:
+    """Tier 1 = ICP-FIT AND logo >= 7 AND (employees >= 100 OR funding >= $5M).
+    Everything else = Tier 2."""
+    icp_fit = str(icp_decision or "").strip().upper() == "ICP"
+    logo_ok = (logo_score or 0) >= _TIER1_MIN_LOGO
+    size_ok = (employees or 0) >= _TIER1_MIN_EMPLOYEES or (funding_amount or 0) >= _TIER1_MIN_FUNDING
+    return "Tier 1" if (icp_fit and logo_ok and size_ok) else "Tier 2"
 
 
 def _linkedin_slug(url: str) -> str | None:
@@ -115,19 +140,36 @@ def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
     # recognizability via Claude). Skips gracefully if scoring isn't configured,
     # and never blocks the Forager write-back on a scoring failure.
     scores = scoring.score_company(fields.get("name") or name, fields)
+    score_fields = scores.get("hubspot_fields", {}) or {}
 
-    # Funding via Deepline (additive + dormant): only when Deepline is enabled AND
-    # the Funding field is still empty. When DEEPLINE_API_KEY is unset this is a no-op,
-    # so the company flow is unchanged from before.
+    # Company Funding via Deepline (Crustdata). Only when enabled and the Funding field
+    # is still empty. We also keep the numeric amount (USD) in `funding_amount` so the
+    # Tier rule below can use it on this and future runs. No-op when Deepline is off.
+    funding_amount = _to_float(props.get("funding_amount"))
     if deepline.is_enabled() and not (props.get("funding") or "").strip():
         try:
-            funding = deepline.get_company_funding(fields.get("domain") or domain, fields.get("name") or name)
-            if funding:
-                fields["funding"] = funding
+            fr = deepline.get_company_funding(fields.get("domain") or domain, fields.get("name") or name)
+            if fr.get("display"):
+                fields["funding"] = fr["display"]
+            if fr.get("amount") is not None:
+                fields["funding_amount"] = fr["amount"]
+                funding_amount = fr["amount"]
         except Exception as exc:  # noqa: BLE001 - funding must never break enrichment
             logger.warning("Deepline funding lookup failed for %s: %s", hubspot_company_id, exc)
 
-    hubspot.update_company(hubspot_company_id, {**fields, **scores.get("hubspot_fields", {})})
+    # Tier 1 / Tier 2 classification (after Claude scoring). Tier 1 = ICP-FIT AND
+    # logo score >= 7 AND (employees >= 100 OR total funding >= $5M); else Tier 2.
+    # Output field is configurable (TIER_FIELD, default "tier") — pending the client's
+    # confirmation of the exact HubSpot field.
+    tier = _classify_tier(
+        icp_decision=score_fields.get("icp_decision"),
+        logo_score=_to_float(score_fields.get("logo_score")),
+        employees=_to_float(fields.get("numberofemployees")),
+        funding_amount=funding_amount,
+    )
+    fields[os.environ.get("TIER_FIELD", "tier")] = tier
+
+    hubspot.update_company(hubspot_company_id, {**fields, **score_fields})
     return {
         "hubspot_company_id": hubspot_company_id,
         "forager_org_id": fields.get("forager_org_id"),
@@ -137,6 +179,7 @@ def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
         "revenue": fields.get("annualrevenue"),
         "icp": scores.get("icp"),
         "logo": scores.get("logo"),
+        "tier": tier,
         "scoring_status": scores.get("status"),
         "status": "enriched",
     }
@@ -218,8 +261,8 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
     else:
         fields = {}
         union = list(dict.fromkeys(work_emails + personal_emails))
-        if work_emails:                       # WORK email -> standard `email`
-            fields["email"] = work_emails[0]
+        # WORK email is NOT taken from Forager anymore (client: rely on Deepline only for
+        # work email). The built-in `email` field is left for Workflow 3 / Deepline.
         if personal_emails:                   # PERSONAL email -> "Email (home)"
             fields["migrated_emails_home"] = personal_emails[0]
         if union:
@@ -588,6 +631,7 @@ def workflow3_deepline(hubspot_contact_id: str) -> dict:
         "company_name": (props.get("company") or "").strip(),
         "linkedin_url": (props.get("linkedin_url") or props.get("hs_linkedin_url") or "").strip(),
         "email": (props.get("migrated_emails_home") or "").strip(),  # personal email helps phone lookups
+        "country": (props.get("country") or "").strip(),  # drives the region-specific phone waterfall
     }
     # Deepline is the FALLBACK after Forager: if Forager already put a work email in the
     # built-in `email` field (or a phone in `phone`), skip that waterfall ENTIRELY — don't
