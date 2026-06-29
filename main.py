@@ -50,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.28 (Tier 1/2 classification; funding via Crustdata; work email = Deepline-only; region-aware phone waterfalls (NAMER/EU/MEA/APAC/LATAM); phone validation = NAMER-only Trestle Real-Contact name-match; +Upcell/Findymail/Wiza/Datagma. Deepline dormant unless DEEPLINE_API_KEY)"
+BUILD = "v3.29 (Deepline payloads self-heal against strict per-tool schema validation: a 422 'unexpected field' is parsed, the rejected fields dropped + cached per tool, and the call retried — fixes every email/phone provider 422'ing on the broad identity payload. Tier 1/2 classification; funding via Crustdata; work email = Deepline-only; region-aware phone waterfalls (NAMER/EU/MEA/APAC/LATAM); phone validation = NAMER-only Trestle Real-Contact name-match. Deepline dormant unless DEEPLINE_API_KEY)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 

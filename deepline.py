@@ -140,27 +140,85 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {DEEPLINE_API_KEY}", "Content-Type": "application/json"}
 
 
+# Deepline validates each tool's payload against a STRICT schema and rejects (HTTP
+# 422) any field the tool doesn't recognise — it does NOT silently ignore extras.
+# The reference doc doesn't publish the exact accepted fields for most tools, so
+# rather than guess we send the broad identity payload and let the validator tell
+# us what to drop: a 422 body enumerates every unexpected field, we strip those and
+# retry, and we remember them per tool so later calls are right on the first shot.
+# A 422 is a pre-execution validation failure, so these retries cost ZERO credits.
+_REJECTED_FIELDS: dict = {}
+
+# Two shapes seen in Deepline 422 bodies:
+#   leadmagic/prospeo/contactout/lusha:  full_name: Unexpected field "full_name".
+#   pdl:                                 company_domain: Unexpected property
+#   hunter (custom):                     ... unexpected field "fullName"
+_UNEXPECTED_QUOTED = re.compile(r'unexpected (?:field|property)\s*"([A-Za-z_][\w]*)"', re.IGNORECASE)
+_UNEXPECTED_PREFIX = re.compile(r'([A-Za-z_][\w]*)\s*:\s*Unexpected (?:field|property)', re.IGNORECASE)
+
+
+def _parse_unexpected_fields(text: str) -> set:
+    """Pull every field name Deepline flagged as unexpected from a 422 body. The body
+    is raw JSON, so inner quotes arrive backslash-escaped (\\"fullName\\") — decode it
+    first so the quoted-field regex sees clean text."""
+    decoded = text or ""
+    try:
+        import json
+        body = json.loads(decoded)
+        if isinstance(body, dict):
+            decoded = " ".join(str(body.get(k, "")) for k in ("error", "message")) or decoded
+    except Exception:  # noqa: BLE001
+        pass
+    fields = set()
+    for rx in (_UNEXPECTED_QUOTED, _UNEXPECTED_PREFIX):
+        for m in rx.finditer(decoded):
+            fields.add(m.group(1))
+    return fields
+
+
 def execute_tool(tool_id: str, payload: dict, timeout: int = 60) -> dict | None:
     """Execute one Deepline tool. Returns the parsed JSON body (dict) or None on any
-    error. Never raises — a failed provider must not break the pipeline."""
+    error. Never raises — a failed provider must not break the pipeline.
+
+    On a 422 "unexpected field" validation error, the offending fields are stripped
+    and the call is retried (and cached per tool), so strict-schema tools succeed
+    without us hardcoding each tool's payload shape."""
     if not is_enabled():
         return None
     url = f"{DEEPLINE_BASE}/integrations/{tool_id}/execute"
-    try:
-        resp = _SESSION.post(url, json={"payload": payload}, headers=_headers(), timeout=timeout)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Deepline %s request failed: %s", tool_id, exc)
-        return None
-    if resp.status_code == 402:
-        logger.warning("Deepline %s -> 402 (out of credits)", tool_id)
-        return None
-    if resp.status_code >= 400:
-        logger.warning("Deepline %s -> HTTP %s: %s", tool_id, resp.status_code, resp.text[:200])
-        return None
-    try:
-        return resp.json()
-    except Exception:  # noqa: BLE001
-        return None
+    # Pre-strip fields this tool already rejected earlier in the process.
+    known_bad = _REJECTED_FIELDS.get(tool_id)
+    if known_bad:
+        payload = {k: v for k, v in payload.items() if k not in known_bad}
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            resp = _SESSION.post(url, json={"payload": payload}, headers=_headers(), timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Deepline %s request failed: %s", tool_id, exc)
+            return None
+        if resp.status_code == 402:
+            logger.warning("Deepline %s -> 402 (out of credits)", tool_id)
+            return None
+        if resp.status_code == 422 and payload and attempts <= 20:
+            unexpected = _parse_unexpected_fields(resp.text) & set(payload)
+            if unexpected:
+                _REJECTED_FIELDS.setdefault(tool_id, set()).update(unexpected)
+                payload = {k: v for k, v in payload.items() if k not in unexpected}
+                logger.info("Deepline %s: dropped unexpected field(s) %s, retrying",
+                            tool_id, ",".join(sorted(unexpected)))
+                if payload:
+                    continue
+            logger.warning("Deepline %s -> HTTP 422: %s", tool_id, resp.text[:200])
+            return None
+        if resp.status_code >= 400:
+            logger.warning("Deepline %s -> HTTP %s: %s", tool_id, resp.status_code, resp.text[:200])
+            return None
+        try:
+            return resp.json()
+        except Exception:  # noqa: BLE001
+            return None
 
 
 def _poll(tool_id: str, payload: dict, tries: int = 12, delay: float = 2.0) -> dict | None:
