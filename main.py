@@ -50,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.35 (Fixed the phone-provider adapters that returned nothing: Upcell now nests identity in a `contact` object (was flat -> empty); Wiza requests enrichment_level=full to actually return phones (DEEPLINE_WIZA_LEVEL); phone extractor now prefers INTERNATIONAL/E.164 format so a bare national number (Datagma's 1718659901) keeps its +country code (+491718659901); +Wiza phone_number1/mobile_phone1 keys. Findymail/Datagma confirmed working (needed the LinkedIn URL). + full per-provider logging + extractor hardening + domain guard + seeded 422 + Trestle/ZeroBounce verdict fixes. Tier 1/2; funding via Crustdata; region-aware phone waterfalls. Deepline dormant unless DEEPLINE_API_KEY)"
+BUILD = "v3.36 (+/debug/phone-waterfall: runs the full region-aware phone waterfall + Trestle for a person without writing to HubSpot or skipping when a phone exists — lets us confirm the phone tools even when Forager always supplies a phone. Fixed the phone-provider adapters that returned nothing: Upcell now nests identity in a `contact` object (was flat -> empty); Wiza requests enrichment_level=full to actually return phones (DEEPLINE_WIZA_LEVEL); phone extractor now prefers INTERNATIONAL/E.164 format so a bare national number (Datagma's 1718659901) keeps its +country code (+491718659901); +Wiza phone_number1/mobile_phone1 keys. Findymail/Datagma confirmed working (needed the LinkedIn URL). + full per-provider logging + extractor hardening + domain guard + seeded 422 + Trestle/ZeroBounce verdict fixes. Tier 1/2; funding via Crustdata; region-aware phone waterfalls. Deepline dormant unless DEEPLINE_API_KEY)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
@@ -353,6 +353,31 @@ def debug_deepline():
         out["tool"] = tool
         out["result"] = deepline.execute_tool(tool, payload)
     return jsonify(out), 200
+
+
+@app.route("/debug/phone-waterfall", methods=["GET", "POST"])
+@require_secret
+def debug_phone_waterfall():
+    """Run the FULL region-aware phone waterfall for a person — every provider in order
+    + Trestle name-match — WITHOUT writing to HubSpot and WITHOUT the 'already has a
+    phone' skip. Lets us confirm the phone tools end-to-end even when Forager always
+    supplies a phone. The full per-provider trail prints to the logs.
+    Example: ?first_name=Malte&last_name=Ubl&domain=vercel.com&country=United States
+             &linkedin_url=https://www.linkedin.com/in/malteubl&email=malte@vercel.com
+    Spends provider credits (it actually runs the waterfall)."""
+    a = {**(request.get_json(silent=True) or {}), **request.args.to_dict()}
+    first, last = a.get("first_name", ""), a.get("last_name", "")
+    inp = {
+        "first_name": first, "last_name": last,
+        "full_name": a.get("full_name") or f"{first} {last}".strip(),
+        "domain": forager.normalize_domain(a.get("domain", "")),
+        "company_name": a.get("company_name", ""),
+        "linkedin_url": a.get("linkedin_url", ""),
+        "email": a.get("email", ""),
+        "country": a.get("country", ""),
+    }
+    result = deepline.run_phone_waterfall(inp) if deepline.is_enabled() else {}
+    return jsonify({"deepline_enabled": deepline.is_enabled(), "input": inp, "result": result}), 200
 
 
 @app.route("/enrich/find-contacts", methods=["POST"])
