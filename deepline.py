@@ -319,36 +319,63 @@ def _coerce_email(val) -> str | None:
     return None
 
 
+# Keys whose values are NEVER phone numbers — skip them in the greedy fallback so a
+# date / id / score / count is never mistaken for a phone (e.g. a verification date
+# "2026-06-29" would otherwise coerce to "20260629").
+_NON_PHONE_KEY_HINTS = (
+    "date", "_on", "_at", "year", "founded", "score", "count", "id", "uuid", "zip",
+    "postal", "version", "timestamp", "grade", "created", "updated", "_ts",
+    "latitude", "longitude", "geo",
+)
+_DATE_LIKE_RE = re.compile(r"^\s*\d{4}-\d{1,2}-\d{1,2}")
+
+
 def _extract_phone(obj) -> str | None:
     if obj is None:
         return None
-    for key in ("mobile", "mobile_phone", "phone", "phone_number", "direct_dial", "number"):
+    # 1) Trusted phone keys first (the value here IS meant to be a phone).
+    for key in ("mobile", "mobile_phone", "mobile_number", "phone", "phone_number",
+                "direct_dial", "number", "phones", "phone_numbers"):
         val = _first(obj, (key,))
         phone = _coerce_phone(val)
         if phone:
             return phone
-    for _, v in _walk(obj):
-        phone = _coerce_phone(v)
+    # 2) Greedy fallback — skip non-phone keys and require a real phone length (>=10
+    #    digits), so dates/ids/scores can't masquerade as a phone number.
+    for k, v in _walk(obj):
+        if isinstance(k, str) and any(h in k.lower() for h in _NON_PHONE_KEY_HINTS):
+            continue
+        phone = _coerce_phone(v, min_digits=10)
         if phone:
             return phone
     return None
 
 
-def _coerce_phone(val) -> str | None:
-    if isinstance(val, (int,)):
+def _coerce_phone(val, min_digits: int = 8) -> str | None:
+    if isinstance(val, int):
         val = str(val)
     if isinstance(val, str):
+        if _DATE_LIKE_RE.match(val):  # a date string, never a phone
+            return None
         m = _PHONE_RE.search(val)
         if m:
             cleaned = re.sub(r"[^\d+]", "", m.group(0))
-            return cleaned if len(re.sub(r"\D", "", cleaned)) >= 8 else None
+            digits = re.sub(r"\D", "", cleaned)
+            # A real phone is ~8–15 digits (E.164 max 15); longer is an id/timestamp.
+            if min_digits <= len(digits) <= 15:
+                return cleaned
         return None
     if isinstance(val, dict):
-        for key in ("number", "phone", "phone_number", "value", "raw"):
+        for key in ("number", "phone", "phone_number", "value", "raw", "e164", "formatted"):
             if val.get(key):
-                return _coerce_phone(val[key])
-    if isinstance(val, list) and val:
-        return _coerce_phone(val[0])
+                got = _coerce_phone(val[key], min_digits)
+                if got:
+                    return got
+    if isinstance(val, list):
+        for item in val:
+            got = _coerce_phone(item, min_digits)
+            if got:
+                return got
     return None
 
 
