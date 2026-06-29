@@ -432,13 +432,62 @@ _PHONE_ADAPTERS = {
 # ---------------------------------------------------------------------------
 # Validators
 # ---------------------------------------------------------------------------
+# Deepline wraps every tool result in a job envelope that ALSO carries a
+# "status" field — the JOB status ("completed"/"running"/"scheduled") — separate
+# from the provider's own verdict "status" (ZeroBounce: valid/invalid/catch-all).
+# A greedy search for "status" can grab the job status by mistake and reject every
+# email. So we locate the verdict object SPECIFICALLY: the nested dict that holds
+# the verdict's "status" alongside a field unique to that verdict (e.g. ZeroBounce's
+# "address"). Falls back to any "status" whose VALUE is a known ZeroBounce verdict.
+_ZB_VERDICTS = {"valid", "invalid", "catch-all", "spamtrap", "abuse", "do-not-mail", "unknown"}
+
+
+def _verdict_object(data, sibling_key: str):
+    """Return the nested dict that has BOTH a 'status' key and `sibling_key` — i.e. the
+    provider's verdict object, not the Deepline job envelope (which has 'status' alone)."""
+    found = [None]
+
+    def walk(o):
+        if found[0] is not None:
+            return
+        if isinstance(o, dict):
+            if "status" in o and sibling_key in o:
+                found[0] = o
+                return
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for item in o:
+                walk(item)
+
+    walk(data)
+    return found[0]
+
+
 def validate_email(email: str) -> dict:
-    """ZeroBounce gate. Returns {"valid": bool, "smtp_provider": str|None, "status": str}.
-    Only status == 'valid' passes; 'invalid' and 'catch-all' fail (per spec)."""
+    """ZeroBounce gate. Returns {"valid": bool, "smtp_provider": str|None, "status": str,
+    "catchall_domain": bool}. Only status == 'valid' passes; 'invalid' and 'catch-all'
+    fail (per spec). Reads the ZeroBounce verdict object, NOT the Deepline job status."""
     data = execute_tool("zerobounce_validate", {"email": email})
-    status = str(_first(data, ("status",)) or "").lower().replace("_", "-")
-    smtp = _first(data, ("smtp_provider", "mx_provider", "provider"))
-    return {"valid": status == "valid", "status": status or "unknown", "smtp_provider": smtp}
+    zb = _verdict_object(data, "address")
+    if zb:
+        raw_status = zb.get("status")
+        smtp = zb.get("smtp_provider") or zb.get("mx_provider") or zb.get("provider")
+        catchall = bool(zb.get("catchall_domain"))
+    else:
+        # Fallback: pick a "status" whose value is a real ZeroBounce verdict (never the
+        # job status), so a wrapper-shape change can't silently reject every email.
+        raw_status, smtp, catchall = None, None, False
+        for k, v in _walk(data or {}):
+            if isinstance(k, str) and k.lower() == "status" and isinstance(v, str) \
+                    and v.strip().lower().replace("_", "-") in _ZB_VERDICTS:
+                raw_status = v
+                break
+        smtp = _first(data, ("smtp_provider", "mx_provider", "provider"))
+        catchall = bool(_first(data, ("catchall_domain",)))
+    status = str(raw_status or "").lower().replace("_", "-")
+    return {"valid": status == "valid", "status": status or "unknown",
+            "smtp_provider": smtp, "catchall_domain": catchall}
 
 
 def _phone_validation_enabled() -> bool:
