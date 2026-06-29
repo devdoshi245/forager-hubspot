@@ -322,58 +322,74 @@ def _coerce_email(val) -> str | None:
 # Keys whose values are NEVER phone numbers — skip them in the greedy fallback so a
 # date / id / score / count is never mistaken for a phone (e.g. a verification date
 # "2026-06-29" would otherwise coerce to "20260629").
+# Keys whose values are NEVER phone numbers — skip them in the greedy fallback so a
+# date / id / score / count / URL is never mistaken for a phone (e.g. a verification
+# date "2026-06-29" -> "20260629", or a timestamp inside a logo URL).
 _NON_PHONE_KEY_HINTS = (
     "date", "_on", "_at", "year", "founded", "score", "count", "id", "uuid", "zip",
     "postal", "version", "timestamp", "grade", "created", "updated", "_ts",
-    "latitude", "longitude", "geo",
+    "latitude", "longitude", "geo", "url", "uri", "href", "logo", "image", "img",
+    "photo", "picture", "avatar", "permalink", "link", "icon",
 )
 _DATE_LIKE_RE = re.compile(r"^\s*\d{4}-\d{1,2}-\d{1,2}")
+_PHONE_SEP_RE = re.compile(r"[ ().\-]")
 
 
 def _extract_phone(obj) -> str | None:
     if obj is None:
         return None
-    # 1) Trusted phone keys first (the value here IS meant to be a phone).
+    # 1) Trusted phone keys first (the value here IS meant to be a phone; bare digits ok).
     for key in ("mobile", "mobile_phone", "mobile_number", "phone", "phone_number",
                 "direct_dial", "number", "phones", "phone_numbers"):
         val = _first(obj, (key,))
         phone = _coerce_phone(val)
         if phone:
             return phone
-    # 2) Greedy fallback — skip non-phone keys and require a real phone length (>=10
-    #    digits), so dates/ids/scores can't masquerade as a phone number.
+    # 2) Greedy fallback — skip non-phone keys AND require phone-shaped formatting (a "+"
+    #    or separators) plus a real length, so a bare digit run from a URL / id / money
+    #    amount / timestamp can't masquerade as a phone (e.g. a logo URL's
+    #    ".../1630609823582/" or a funding figure 863000000).
     for k, v in _walk(obj):
         if isinstance(k, str) and any(h in k.lower() for h in _NON_PHONE_KEY_HINTS):
             continue
-        phone = _coerce_phone(v, min_digits=10)
+        phone = _coerce_phone(v, min_digits=10, require_format=True)
         if phone:
             return phone
     return None
 
 
-def _coerce_phone(val, min_digits: int = 8) -> str | None:
+def _coerce_phone(val, min_digits: int = 8, require_format: bool = False) -> str | None:
     if isinstance(val, int):
         val = str(val)
     if isinstance(val, str):
-        if _DATE_LIKE_RE.match(val):  # a date string, never a phone
+        if _DATE_LIKE_RE.match(val):                                   # a date, not a phone
+            return None
+        if "/" in val or "http" in val.lower() or "@" in val:          # URL/email, not a phone
             return None
         m = _PHONE_RE.search(val)
         if m:
-            cleaned = re.sub(r"[^\d+]", "", m.group(0))
+            matched = m.group(0)
+            cleaned = re.sub(r"[^\d+]", "", matched)
             digits = re.sub(r"\D", "", cleaned)
-            # A real phone is ~8–15 digits (E.164 max 15); longer is an id/timestamp.
-            if min_digits <= len(digits) <= 15:
-                return cleaned
+            # A real phone is ~min_digits–15 digits (E.164 max 15); longer is an id/timestamp.
+            if not (min_digits <= len(digits) <= 15):
+                return None
+            # In the greedy context, demand phone formatting (+ or separators) so a bare
+            # digit run (id / money / timestamp) is never taken as a phone.
+            if require_format and "+" not in matched and not _PHONE_SEP_RE.search(matched):
+                return None
+            return cleaned
         return None
     if isinstance(val, dict):
-        for key in ("number", "phone", "phone_number", "value", "raw", "e164", "formatted"):
+        for key in ("number", "phone", "phone_number", "mobile", "mobile_number",
+                    "value", "raw", "e164", "formatted", "international", "national"):
             if val.get(key):
-                got = _coerce_phone(val[key], min_digits)
+                got = _coerce_phone(val[key], min_digits, require_format)
                 if got:
                     return got
     if isinstance(val, list):
         for item in val:
-            got = _coerce_phone(item, min_digits)
+            got = _coerce_phone(item, min_digits, require_format)
             if got:
                 return got
     return None
@@ -598,8 +614,11 @@ def validate_phone(phone: str, name: str, region: str = "namer") -> dict:
 # ---------------------------------------------------------------------------
 # Waterfall engine (shared structure for email + phone)
 # ---------------------------------------------------------------------------
-def _run_waterfall(order: list, adapters: dict, inp: dict, validate, normalize, channel: str) -> dict:
+def _run_waterfall(order: list, adapters: dict, inp: dict, validate, normalize, channel: str,
+                   accept=None) -> dict:
     """Try providers in order; validate each candidate; apply both boundary rules.
+    `accept` (optional) pre-filters a raw candidate BEFORE validation — used by the
+    email waterfall to drop a wrong-company address without poisoning the boundary set.
     Returns {"value": ..., "meta": {...}, "providers_tried": n, "winner": key} or {}."""
     failed: set = set()
     tried = 0
@@ -615,6 +634,11 @@ def _run_waterfall(order: list, adapters: dict, inp: dict, validate, normalize, 
             continue
         if not raw:
             continue
+        if accept is not None and not accept(raw):
+            # Off-target (e.g. an email at a DIFFERENT company than we're enriching for).
+            # Skip without adding to `failed` so it can't trip the boundary stop.
+            logger.info("Deepline %s: provider %s returned an off-target value -> skipping", channel, key)
+            continue
         norm = normalize(raw)
         if norm in failed:
             # Boundary rule 1 (don't re-validate a known-bad value) AND rule 2 (a
@@ -629,12 +653,28 @@ def _run_waterfall(order: list, adapters: dict, inp: dict, validate, normalize, 
     return {}
 
 
+def _email_domain_ok(email: str, domain: str) -> bool:
+    """True if `email` belongs to the target company `domain` (exact, or a sub/parent
+    domain). Guards against enrich-person tools returning the person's email at a
+    DIFFERENT current employer (e.g. a board seat). Set DEEPLINE_EMAIL_DOMAIN_MATCH=off
+    to disable (e.g. for companies whose email domain differs from their website)."""
+    if (os.environ.get("DEEPLINE_EMAIL_DOMAIN_MATCH") or "on").strip().lower() in ("off", "0", "false", "no"):
+        return True
+    if not domain or "@" not in (email or ""):
+        return True
+    ed = email.rsplit("@", 1)[1].lower().strip().replace("www.", "")
+    d = domain.lower().strip().lstrip("/").replace("www.", "")
+    return bool(ed) and (ed == d or ed.endswith("." + d) or d.endswith("." + ed))
+
+
 def run_email_waterfall(inp: dict) -> dict:
     if not is_enabled() or not inp.get("domain") or not (inp.get("first_name") or inp.get("full_name")):
         return {}
+    domain = inp.get("domain")
     return _run_waterfall(_order("DEEPLINE_EMAIL_ORDER", _DEFAULT_EMAIL_ORDER),
                           _EMAIL_ADAPTERS, inp, validate_email,
-                          lambda e: e.lower().strip(), "email")
+                          lambda e: e.lower().strip(), "email",
+                          accept=lambda e: _email_domain_ok(e, domain))
 
 
 def run_phone_waterfall(inp: dict) -> dict:

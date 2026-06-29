@@ -50,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.32 (Seed the per-tool payload schemas from observed 422s so the FIRST contact in a fresh process is one-shot — no cold-start retries (Hunter was ~12). Self-heal still corrects anything unseeded. + Phone validation reads Trestle's flattened phone.name_match (was a silent no-op accepting mismatches). + ZeroBounce gate reads the verdict status not the job status. + Deepline payloads self-heal against strict per-tool 422 validation. Tier 1/2 classification; funding via Crustdata; work email = Deepline-only; region-aware phone waterfalls (NAMER/EU/MEA/APAC/LATAM); phone validation = NAMER-only Trestle Real-Contact name-match. Deepline dormant unless DEEPLINE_API_KEY)"
+BUILD = "v3.33 (Extractor hardening from a full tool-response audit: phone extractor now ignores URLs/ids/money/timestamps (greedy fallback requires phone formatting; rejects URL strings) — a Crustdata logo-URL timestamp was being read as a phone; + email domain-match guard so an enrich tool returning the person's email at a DIFFERENT employer (e.g. a board seat) is dropped, not written to the wrong contact (DEEPLINE_EMAIL_DOMAIN_MATCH=off to disable). + seeded per-tool 422 schemas (one-shot first contact) + Trestle phone.name_match + ZeroBounce verdict-status + 422 self-heal. Tier 1/2; funding via Crustdata; work email = Deepline-only; region-aware phone waterfalls. Deepline dormant unless DEEPLINE_API_KEY)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
