@@ -486,9 +486,12 @@ def _phone_findymail(inp):    return _extract_phone(execute_tool("findymail_find
 
 
 def _phone_upcell(inp):
-    """Upcell wants the identity NESTED inside a `contact` object (camelCase), plus a
-    `fields` list — a flat payload returns nothing. Mobile-only is what Upcell enables."""
-    contact = {k: v for k, v in {
+    """Upcell wants the identity FLAT + camelCase at the top level (linkedinUrl,
+    firstName, lastName, companyName, companyDomain, email, personalEmail) plus a
+    `fields` list — NOT nested in a `contact` object. (Per the live 422: "Provide
+    linkedinUrl, email, personalEmail, firstName+lastName+title+companyName, or
+    firstName+lastName plus companyDomain/companySocialUrl.") Mobile-only for now."""
+    payload = {k: v for k, v in {
         "linkedinUrl": inp.get("linkedin_url"),
         "firstName": inp.get("first_name"),
         "lastName": inp.get("last_name"),
@@ -496,7 +499,8 @@ def _phone_upcell(inp):
         "companyDomain": inp.get("domain"),
         "email": inp.get("email"),
     }.items() if v}
-    return _extract_phone(execute_tool("upcell_enrich_contact", {"contact": contact, "fields": ["mobile"]}))
+    payload["fields"] = ["mobile"]
+    return _extract_phone(execute_tool("upcell_enrich_contact", payload))
 
 
 def _phone_wiza(inp):
