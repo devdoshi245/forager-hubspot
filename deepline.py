@@ -338,9 +338,15 @@ _PHONE_SEP_RE = re.compile(r"[ ().\-]")
 def _extract_phone(obj) -> str | None:
     if obj is None:
         return None
-    # 1) Trusted phone keys first (the value here IS meant to be a phone; bare digits ok).
-    for key in ("mobile", "mobile_phone", "mobile_number", "phone", "phone_number",
-                "direct_dial", "number", "phones", "phone_numbers"):
+    # 1) Trusted phone keys. INTERNATIONAL / E.164 keys FIRST so we keep the full
+    #    +country-code number — some tools (e.g. Datagma) put the bare national number
+    #    under "number" (1718659901) and the real one under "displayInternational"
+    #    (+49 171 8659901). Then the common keys; then provider-specific ones (Wiza
+    #    phone_number1/mobile_phone1). Bare digits are allowed here (trusted keys).
+    for key in ("displayinternational", "phone_international", "international", "e164",
+                "mobile_international", "mobile", "mobile_phone", "mobile_number",
+                "phone", "phone_number", "direct_dial", "number", "phones", "phone_numbers",
+                "mobile_phone1", "phone_number1", "mobile_phone2", "phone_number2"):
         val = _first(obj, (key,))
         phone = _coerce_phone(val)
         if phone:
@@ -381,8 +387,9 @@ def _coerce_phone(val, min_digits: int = 8, require_format: bool = False) -> str
             return cleaned
         return None
     if isinstance(val, dict):
-        for key in ("number", "phone", "phone_number", "mobile", "mobile_number",
-                    "value", "raw", "e164", "formatted", "international", "national"):
+        for key in ("displayInternational", "phone_international", "international", "e164",
+                    "mobile_international", "number", "phone", "phone_number", "mobile",
+                    "mobile_number", "value", "raw", "formatted", "national"):
             if val.get(key):
                 got = _coerce_phone(val[key], min_digits, require_format)
                 if got:
@@ -469,17 +476,36 @@ _EMAIL_ADAPTERS = {
 
 
 # --- PHONE finder adapters: each returns a candidate phone or None ---
-# NOTE: the exact tool IDs/payloads for the newer providers (upcell, findymail, wiza,
-# datagma) are best-effort from the Deepline docs and confirmed on the first live run.
 def _phone_leadmagic(inp):    return _extract_phone(execute_tool("leadmagic_mobile_finder", _identity(inp)))
 def _phone_contactout(inp):   return _extract_phone(execute_tool("contactout_enrich_person", _identity(inp, {"include": ["phone"]})))
 def _phone_lusha(inp):        return _extract_phone(execute_tool("lusha_enrich_person", _identity(inp, {"reveal_phones": True})))
 def _phone_pdl(inp):          return _extract_phone(execute_tool("peopledatalabs_enrich_contact", _identity(inp)))
 def _phone_prospeo(inp):      return _extract_phone(execute_tool("prospeo_enrich_person", _identity(inp, {"enrich_mobile": True})))
-def _phone_upcell(inp):       return _extract_phone(execute_tool("upcell_enrich_contact", _identity(inp, {"fields": ["mobile"]})))
 def _phone_datagma(inp):      return _extract_phone(execute_tool("datagma_search_phone_numbers", _identity(inp)))
-def _phone_wiza(inp):         return _extract_phone(execute_tool("wiza_reveal_person", _identity(inp)))
 def _phone_findymail(inp):    return _extract_phone(execute_tool("findymail_find_phone", _identity(inp)))
+
+
+def _phone_upcell(inp):
+    """Upcell wants the identity NESTED inside a `contact` object (camelCase), plus a
+    `fields` list — a flat payload returns nothing. Mobile-only is what Upcell enables."""
+    contact = {k: v for k, v in {
+        "linkedinUrl": inp.get("linkedin_url"),
+        "firstName": inp.get("first_name"),
+        "lastName": inp.get("last_name"),
+        "companyName": inp.get("company_name"),
+        "companyDomain": inp.get("domain"),
+        "email": inp.get("email"),
+    }.items() if v}
+    return _extract_phone(execute_tool("upcell_enrich_contact", {"contact": contact, "fields": ["mobile"]}))
+
+
+def _phone_wiza(inp):
+    """Wiza only returns phones at enrichment_level 'full' (~7 credits) and is async.
+    We submit at 'full' and read phone_number1/mobile_phone1; we do NOT re-poll (avoids
+    double-charging) — if Deepline returns it queued, the waterfall just moves on. Level
+    is overridable via DEEPLINE_WIZA_LEVEL (e.g. 'partial' to skip phone credits)."""
+    level = os.environ.get("DEEPLINE_WIZA_LEVEL") or "full"
+    return _extract_phone(execute_tool("wiza_reveal_person", _identity(inp, {"enrichment_level": level})))
 
 
 def _phone_fullenrich(inp):
