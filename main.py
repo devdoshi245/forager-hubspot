@@ -50,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.33 (Extractor hardening from a full tool-response audit: phone extractor now ignores URLs/ids/money/timestamps (greedy fallback requires phone formatting; rejects URL strings) — a Crustdata logo-URL timestamp was being read as a phone; + email domain-match guard so an enrich tool returning the person's email at a DIFFERENT employer (e.g. a board seat) is dropped, not written to the wrong contact (DEEPLINE_EMAIL_DOMAIN_MATCH=off to disable). + seeded per-tool 422 schemas (one-shot first contact) + Trestle phone.name_match + ZeroBounce verdict-status + 422 self-heal. Tier 1/2; funding via Crustdata; work email = Deepline-only; region-aware phone waterfalls. Deepline dormant unless DEEPLINE_API_KEY)"
+BUILD = "v3.34 (Full per-provider waterfall logging: each tool logs tried -> found-nothing / returned X but REJECTED (reason) / RESOLVED by <tool> = <value> [verdict] — so Railway logs show exactly which tool produced the email/phone and which failed and why. + extractor hardening (phone ignores URLs/ids/money; email domain-match guard) + seeded 422 schemas + Trestle phone.name_match + ZeroBounce verdict-status + 422 self-heal. Tier 1/2; funding via Crustdata; work email = Deepline-only; region-aware phone waterfalls. Deepline dormant unless DEEPLINE_API_KEY)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 

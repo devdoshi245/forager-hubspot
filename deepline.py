@@ -614,11 +614,34 @@ def validate_phone(phone: str, name: str, region: str = "namer") -> dict:
 # ---------------------------------------------------------------------------
 # Waterfall engine (shared structure for email + phone)
 # ---------------------------------------------------------------------------
+def _verdict_brief(verdict: dict) -> str:
+    """One-line summary of a validation verdict, for the per-provider log trail."""
+    if not isinstance(verdict, dict):
+        return ""
+    if verdict.get("status"):  # email (ZeroBounce)
+        s = str(verdict["status"])
+        if verdict.get("catchall_domain"):
+            s += ",catch-all-domain"
+        if verdict.get("smtp_provider"):
+            s += ",%s" % verdict["smtp_provider"]
+        return s
+    bits = []  # phone (Trestle) / generic
+    if "name_match" in verdict:
+        bits.append("name_match=%s" % verdict.get("name_match"))
+    if not verdict.get("validated"):
+        bits.append("not-validated")
+    if verdict.get("region"):
+        bits.append("region=%s" % verdict["region"])
+    return ",".join(bits)
+
+
 def _run_waterfall(order: list, adapters: dict, inp: dict, validate, normalize, channel: str,
                    accept=None) -> dict:
     """Try providers in order; validate each candidate; apply both boundary rules.
     `accept` (optional) pre-filters a raw candidate BEFORE validation — used by the
     email waterfall to drop a wrong-company address without poisoning the boundary set.
+    Logs the full per-provider trail (tried -> nothing / rejected / resolved) so the
+    Railway logs show which tool produced the value and which ones failed and why.
     Returns {"value": ..., "meta": {...}, "providers_tried": n, "winner": key} or {}."""
     failed: set = set()
     tried = 0
@@ -630,26 +653,31 @@ def _run_waterfall(order: list, adapters: dict, inp: dict, validate, normalize, 
         try:
             raw = adapter(inp)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Deepline %s provider %s errored: %s", channel, key, exc)
+            logger.warning("Deepline %s: %s errored: %s", channel, key, exc)
             continue
         if not raw:
+            logger.info("Deepline %s: %s found nothing", channel, key)
             continue
         if accept is not None and not accept(raw):
             # Off-target (e.g. an email at a DIFFERENT company than we're enriching for).
             # Skip without adding to `failed` so it can't trip the boundary stop.
-            logger.info("Deepline %s: provider %s returned an off-target value -> skipping", channel, key)
+            logger.info("Deepline %s: %s returned %s (off-target company) -> skipping", channel, key, raw)
             continue
         norm = normalize(raw)
         if norm in failed:
             # Boundary rule 1 (don't re-validate a known-bad value) AND rule 2 (a
             # second provider surfaced the same rejected value) -> stop, return blank.
-            logger.info("Deepline %s: provider %s repeated a rejected value -> stopping (blank)", channel, key)
+            logger.info("Deepline %s: %s repeated rejected value %s -> stopping (blank)", channel, key, raw)
             return {}
         verdict = validate(norm)
+        brief = _verdict_brief(verdict)
         if verdict.get("valid"):
-            logger.info("Deepline %s resolved by %s (providers tried=%d)", channel, key, tried)
+            logger.info("Deepline %s RESOLVED by %s = %s [%s] (providers tried=%d)",
+                        channel, key, raw, brief, tried)
             return {"value": raw, "meta": verdict, "providers_tried": tried, "winner": key}
+        logger.info("Deepline %s: %s returned %s but REJECTED (%s)", channel, key, raw, brief or "invalid")
         failed.add(norm)  # rejected once; a repeat from any later provider triggers the stop above
+    logger.info("Deepline %s: no valid result after trying %d provider(s)", channel, tried)
     return {}
 
 
