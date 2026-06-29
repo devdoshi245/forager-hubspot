@@ -496,23 +496,49 @@ def _phone_validation_enabled() -> bool:
     return (os.environ.get("DEEPLINE_PHONE_VALIDATION") or "on").strip().lower() not in ("off", "0", "false", "no")
 
 
+def _phone_name_match(data):
+    """Read Trestle Real Contact's PHONE name-match. Trestle returns FLATTENED dotted
+    keys ("phone.name_match", "phone.is_valid", ...) and ALSO carries address.name_match
+    / email.name_match — so a bare "name_match" lookup misses the right field entirely
+    (and silently accepts everything, incl. real mismatches). Read the phone one
+    specifically, tolerating both the dotted-flat shape and a nested {"phone": {...}}."""
+    if not isinstance(data, (dict, list)):
+        return None
+    # 1) flattened dotted key (the shape Trestle actually returns)
+    val = _first(data, ("phone.name_match",))
+    if val is not None:
+        return val
+    # 2) nested {"phone": {"name_match": ...}}
+    phone_obj = _first(data, ("phone",))
+    if isinstance(phone_obj, dict) and "name_match" in phone_obj:
+        return phone_obj.get("name_match")
+    # 3) last-resort bare key
+    return _first(data, ("name_match",))
+
+
 def validate_phone(phone: str, name: str, region: str = "namer") -> dict:
     """Phone gate per Shirish's call:
-      * Trestle's validity / activity-score are NOT used (deemed unreliable).
-      * ONLY the Trestle 'Real Contact' name-match is used, and ONLY for NAMER.
-        Accept name_match == True OR unknown/'Don't know'; reject ONLY explicit False.
+      * Trestle's validity / activity-score are NOT used to GATE (deemed unreliable).
+      * ONLY the Trestle 'Real Contact' PHONE name-match is used, and ONLY for NAMER.
+        Accept name_match == True OR unknown/'Don't know' (null); reject ONLY explicit False.
       * EMEA / APAC / LATAM / unknown regions: NO validation — accept as-is.
-      * If validation is globally off, or Real Contact returns nothing, accept (skip)."""
+      * If validation is globally off, or Real Contact returns nothing, accept (skip).
+    Activity score + line type are captured as metadata (not used to gate)."""
     if region != "namer" or not _phone_validation_enabled():
         return {"valid": True, "validated": False, "region": region}
     data = execute_tool("trestle_real_contact", {"phone": phone, "name": name})
     if data is None:
         # "If Real Contact proves tricky in Deepline, skip validation" -> accept.
         return {"valid": True, "validated": False, "region": region, "note": "real_contact unavailable"}
-    nm = _first(data, ("name_match",))
+    nm = _phone_name_match(data)
     nm_s = str(nm).strip().lower() if nm is not None else ""
     rejected = (nm is False) or nm_s in ("false", "no", "mismatch", "name.mismatch", "no_match")
-    return {"valid": not rejected, "validated": True, "region": region, "name_match": nm}
+    return {
+        "valid": not rejected, "validated": True, "region": region, "name_match": nm,
+        # Metadata only — surfaced to HubSpot, never used to accept/reject.
+        "activity_score": _first(data, ("phone.activity_score", "activity_score")),
+        "line_type": _first(data, ("phone.linetype", "phone.line_type", "linetype", "line_type")),
+    }
 
 
 # ---------------------------------------------------------------------------
