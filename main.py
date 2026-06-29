@@ -50,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.31 (Phone validation fix: Trestle returns FLATTENED dotted keys (phone.name_match) plus address./email. name-match siblings, so the bare 'name_match' lookup always missed and silently accepted every phone incl. real name MISMATCHES — now read phone.name_match specifically + capture activity_score/line_type. + ZeroBounce gate reads the verdict status not the job status. + Deepline payloads self-heal against strict per-tool 422 validation. Tier 1/2 classification; funding via Crustdata; work email = Deepline-only; region-aware phone waterfalls (NAMER/EU/MEA/APAC/LATAM); phone validation = NAMER-only Trestle Real-Contact name-match. Deepline dormant unless DEEPLINE_API_KEY)"
+BUILD = "v3.32 (Seed the per-tool payload schemas from observed 422s so the FIRST contact in a fresh process is one-shot — no cold-start retries (Hunter was ~12). Self-heal still corrects anything unseeded. + Phone validation reads Trestle's flattened phone.name_match (was a silent no-op accepting mismatches). + ZeroBounce gate reads the verdict status not the job status. + Deepline payloads self-heal against strict per-tool 422 validation. Tier 1/2 classification; funding via Crustdata; work email = Deepline-only; region-aware phone waterfalls (NAMER/EU/MEA/APAC/LATAM); phone validation = NAMER-only Trestle Real-Contact name-match. Deepline dormant unless DEEPLINE_API_KEY)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 

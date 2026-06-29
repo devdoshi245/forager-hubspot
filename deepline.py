@@ -147,7 +147,34 @@ def _headers() -> dict:
 # us what to drop: a 422 body enumerates every unexpected field, we strip those and
 # retry, and we remember them per tool so later calls are right on the first shot.
 # A 422 is a pre-execution validation failure, so these retries cost ZERO credits.
-_REJECTED_FIELDS: dict = {}
+#
+# SEED: the exact reject-lists observed from live 422 responses, so even the FIRST
+# contact in a fresh process sends the right payload immediately — no cold-start
+# round-trips (Hunter in particular reports unexpected fields one at a time, which
+# was ~12 retries on the first contact). This is purely an optimisation: the runtime
+# self-heal above still corrects anything not seeded (or if Deepline changes a schema).
+_REJECTED_FIELDS_SEED: dict = {
+    "hunter_email_finder": {
+        "fullName", "name", "company_domain", "companyDomain", "domainOrCompany",
+        "company_name", "linkedin_url", "linkedinUrl", "linkedinProfileUrl",
+        "profile_url", "profile", "email"},
+    "leadmagic_email_finder": {
+        "company", "companyDomain", "domainOrCompany", "email", "fullName", "full_name",
+        "linkedinProfileUrl", "linkedinUrl", "linkedin_url", "name", "profile", "profile_url"},
+    "prospeo_enrich_person": {
+        "company", "companyDomain", "domainOrCompany", "fullName", "linkedinProfileUrl",
+        "linkedinUrl", "name", "profile", "profile_url"},
+    "contactout_enrich_person": {
+        "companyDomain", "company_name", "domain", "domainOrCompany", "fullName",
+        "linkedinProfileUrl", "linkedinUrl", "name", "profile", "profile_url"},
+    "peopledatalabs_enrich_contact": {
+        "companyDomain", "company_domain", "domainOrCompany", "fullName", "full_name",
+        "linkedinProfileUrl", "linkedinUrl", "profile_url"},
+    "lusha_enrich_person": {
+        "company", "companyDomain", "domain", "domainOrCompany", "fullName", "full_name",
+        "linkedinProfileUrl", "linkedinUrl", "name", "profile", "profile_url"},
+}
+_REJECTED_FIELDS: dict = {tool: set(fields) for tool, fields in _REJECTED_FIELDS_SEED.items()}
 
 # Two shapes seen in Deepline 422 bodies:
 #   leadmagic/prospeo/contactout/lusha:  full_name: Unexpected field "full_name".
