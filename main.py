@@ -50,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.43 (Reverted logo-step web-search cap back to 5 (speed handled via the faster ANTHROPIC_MODEL, e.g. claude-sonnet-4-6). Phone extractor now also covers camelCase/cell mobile keys (mobilePhone/mobileNumber/cell/cellphone/phonenumber) so we are prepared for Upcell-style output whose populated shape we have not directly observed. Email extraction now PREFERS the target-company email when a provider returns several — ContactOut returned [jsconf.eu, vercel.com] and we were grabbing jsconf (first) and rejecting it, throwing away the usable vercel.com address; now we pick the domain-matching one. +?raw=1 on the test endpoints surfaces each provider's full JSON, to verify extraction picks the RIGHT value (e.g. the target-domain email when a tool returns several). +/debug/email-tools + /debug/phone-tools: run EACH tool's real adapter through real extraction + validation, no first-success stop, no HubSpot write, ?tools= filter to test only specific tools. Upcell payload fixed to FLAT camelCase top-level fields (the `contact` nesting was wrong; live 422 confirmed it wants linkedinUrl/firstName/lastName/companyDomain/email flat). +/debug/phone-waterfall: runs the full region-aware phone waterfall + Trestle for a person without writing to HubSpot or skipping when a phone exists — lets us confirm the phone tools even when Forager always supplies a phone. Fixed the phone-provider adapters that returned nothing: Upcell now nests identity in a `contact` object (was flat -> empty); Wiza requests enrichment_level=full to actually return phones (DEEPLINE_WIZA_LEVEL); phone extractor now prefers INTERNATIONAL/E.164 format so a bare national number (Datagma's 1718659901) keeps its +country code (+491718659901); +Wiza phone_number1/mobile_phone1 keys. Findymail/Datagma confirmed working (needed the LinkedIn URL). + full per-provider logging + extractor hardening + domain guard + seeded 422 + Trestle/ZeroBounce verdict fixes. Tier 1/2; funding via Crustdata; region-aware phone waterfalls. Deepline dormant unless DEEPLINE_API_KEY)"
+BUILD = "v3.44 (+/debug/funding?domain= probes a funding source (default Crustdata company-DB screener crustdata_companydb_search, which actually carries funding unlike the enrich tool) and returns raw JSON, to wire funding extraction. Reverted logo-step web-search cap back to 5 (speed handled via the faster ANTHROPIC_MODEL, e.g. claude-sonnet-4-6). Phone extractor now also covers camelCase/cell mobile keys (mobilePhone/mobileNumber/cell/cellphone/phonenumber) so we are prepared for Upcell-style output whose populated shape we have not directly observed. Email extraction now PREFERS the target-company email when a provider returns several — ContactOut returned [jsconf.eu, vercel.com] and we were grabbing jsconf (first) and rejecting it, throwing away the usable vercel.com address; now we pick the domain-matching one. +?raw=1 on the test endpoints surfaces each provider's full JSON, to verify extraction picks the RIGHT value (e.g. the target-domain email when a tool returns several). +/debug/email-tools + /debug/phone-tools: run EACH tool's real adapter through real extraction + validation, no first-success stop, no HubSpot write, ?tools= filter to test only specific tools. Upcell payload fixed to FLAT camelCase top-level fields (the `contact` nesting was wrong; live 422 confirmed it wants linkedinUrl/firstName/lastName/companyDomain/email flat). +/debug/phone-waterfall: runs the full region-aware phone waterfall + Trestle for a person without writing to HubSpot or skipping when a phone exists — lets us confirm the phone tools even when Forager always supplies a phone. Fixed the phone-provider adapters that returned nothing: Upcell now nests identity in a `contact` object (was flat -> empty); Wiza requests enrichment_level=full to actually return phones (DEEPLINE_WIZA_LEVEL); phone extractor now prefers INTERNATIONAL/E.164 format so a bare national number (Datagma's 1718659901) keeps its +country code (+491718659901); +Wiza phone_number1/mobile_phone1 keys. Findymail/Datagma confirmed working (needed the LinkedIn URL). + full per-provider logging + extractor hardening + domain guard + seeded 422 + Trestle/ZeroBounce verdict fixes. Tier 1/2; funding via Crustdata; region-aware phone waterfalls. Deepline dormant unless DEEPLINE_API_KEY)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
@@ -421,6 +421,34 @@ def debug_phone_tools():
     raw = str(a.get("raw", "")).lower() in ("1", "true", "yes", "on")
     return jsonify({"deepline_enabled": deepline.is_enabled(), "input": inp,
                     "phone": deepline.test_phone_tools(inp, _only_tools(a), include_raw=raw)}), 200
+
+
+@app.route("/debug/funding", methods=["GET", "POST"])
+@require_secret
+def debug_funding():
+    """Probe a company-funding source by domain and return the RAW response (no HubSpot
+    write) so we can see which funding fields it carries. Defaults to Crustdata's
+    company-DB screener (the Crustdata endpoint that actually holds funding), which
+    needs a filter payload a plain /debug/deepline call can't send. Override the source
+    with ?tool= (e.g. contactout_enrich_person, lusha_enrich_company).
+    Example: ?domain=vercel.com . Spends ~0.4 provider credits."""
+    a = {**(request.get_json(silent=True) or {}), **request.args.to_dict()}
+    domain = forager.normalize_domain(a.get("domain", ""))
+    name = (a.get("name") or "").strip()
+    tool = a.get("tool") or "crustdata_companydb_search"
+    if "companydb_search" in tool or "company_db_search" in tool:
+        if domain:
+            payload = {"filters": [{"filter_type": "company_website_domain", "type": "=", "value": domain}], "limit": 3}
+        elif name:
+            payload = {"filters": [{"filter_type": "company_name", "type": "(.)", "value": name}], "limit": 3}
+        else:
+            return jsonify({"error": "pass ?domain= or ?name="}), 400
+    else:
+        payload = {k: v for k, v in {"domain": domain, "companyDomain": domain,
+                                     "company_domain": domain, "company_name": name}.items() if v}
+    result = deepline.execute_tool(tool, payload) if deepline.is_enabled() else None
+    return jsonify({"deepline_enabled": deepline.is_enabled(), "tool": tool,
+                    "payload": payload, "result": result}), 200
 
 
 @app.route("/enrich/find-contacts", methods=["POST"])
