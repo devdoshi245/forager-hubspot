@@ -34,6 +34,7 @@ break Workflow 2 or a webhook.
 import logging
 import os
 import re
+import threading
 import time
 
 import httpclient
@@ -41,6 +42,10 @@ import httpclient
 logger = logging.getLogger(__name__)
 
 _SESSION = httpclient.make_session()
+
+# Thread-local capture of raw execute_tool responses — used ONLY by the debug test
+# harness (?raw=1) to surface each provider's full JSON. Off by default (no overhead).
+_capture = threading.local()
 
 DEEPLINE_BASE = "https://code.deepline.com/api/v2"
 DEEPLINE_API_KEY = os.environ.get("DEEPLINE_API_KEY")
@@ -243,9 +248,13 @@ def execute_tool(tool_id: str, payload: dict, timeout: int = 60) -> dict | None:
             logger.warning("Deepline %s -> HTTP %s: %s", tool_id, resp.status_code, resp.text[:200])
             return None
         try:
-            return resp.json()
+            parsed = resp.json()
         except Exception:  # noqa: BLE001
             return None
+        buf = getattr(_capture, "buf", None)
+        if buf is not None:
+            buf.append({"tool": tool_id, "response": parsed})
+        return parsed
 
 
 def _poll(tool_id: str, payload: dict, tries: int = 12, delay: float = 2.0) -> dict | None:
@@ -758,7 +767,19 @@ def run_phone_waterfall(inp: dict) -> dict:
 # to HubSpot. `only` (a list of tool keys) limits which tools run — pass it to confirm
 # just the unverified ones and avoid spending on tools already proven.
 # ---------------------------------------------------------------------------
-def test_email_tools(inp: dict, only: list | None = None) -> list:
+def _run_adapter_capturing(adapter, inp, include_raw):
+    """Call an adapter, optionally capturing the raw execute_tool responses it makes."""
+    if not include_raw:
+        return adapter(inp), None
+    _capture.buf = []
+    try:
+        value = adapter(inp)
+        return value, list(_capture.buf)
+    finally:
+        _capture.buf = None
+
+
+def test_email_tools(inp: dict, only: list | None = None, include_raw: bool = False) -> list:
     if not is_enabled():
         return []
     keys = list(only) if only else _order("DEEPLINE_EMAIL_ORDER", _DEFAULT_EMAIL_ORDER)
@@ -770,22 +791,25 @@ def test_email_tools(inp: dict, only: list | None = None) -> list:
             out.append({"tool": key, "error": "unknown tool"})
             continue
         try:
-            raw = adapter(inp)
+            raw, captured = _run_adapter_capturing(adapter, inp, include_raw)
         except Exception as exc:  # noqa: BLE001
             out.append({"tool": key, "found": False, "error": str(exc)})
             continue
         if not raw:
-            out.append({"tool": key, "found": False})
-            continue
-        verdict = validate_email(raw.lower().strip())
-        dom_ok = _email_domain_ok(raw, domain)
-        out.append({"tool": key, "email": raw, "zerobounce": verdict.get("status"),
-                    "valid": verdict.get("valid"), "domain_ok": dom_ok,
-                    "accepted": bool(verdict.get("valid") and dom_ok)})
+            entry = {"tool": key, "found": False}
+        else:
+            verdict = validate_email(raw.lower().strip())
+            dom_ok = _email_domain_ok(raw, domain)
+            entry = {"tool": key, "email": raw, "zerobounce": verdict.get("status"),
+                     "valid": verdict.get("valid"), "domain_ok": dom_ok,
+                     "accepted": bool(verdict.get("valid") and dom_ok)}
+        if include_raw:
+            entry["raw"] = captured
+        out.append(entry)
     return out
 
 
-def test_phone_tools(inp: dict, only: list | None = None) -> dict:
+def test_phone_tools(inp: dict, only: list | None = None, include_raw: bool = False) -> dict:
     if not is_enabled():
         return {}
     region = _region_for_country(inp.get("country"))
@@ -798,16 +822,19 @@ def test_phone_tools(inp: dict, only: list | None = None) -> dict:
             out.append({"tool": key, "error": "unknown tool"})
             continue
         try:
-            raw = adapter(inp)
+            raw, captured = _run_adapter_capturing(adapter, inp, include_raw)
         except Exception as exc:  # noqa: BLE001
             out.append({"tool": key, "found": False, "error": str(exc)})
             continue
         if not raw:
-            out.append({"tool": key, "found": False})
-            continue
-        verdict = validate_phone(re.sub(r"\D", "", raw), name, region)
-        out.append({"tool": key, "phone": raw, "name_match": verdict.get("name_match"),
-                    "valid": verdict.get("valid"), "validated": verdict.get("validated")})
+            entry = {"tool": key, "found": False}
+        else:
+            verdict = validate_phone(re.sub(r"\D", "", raw), name, region)
+            entry = {"tool": key, "phone": raw, "name_match": verdict.get("name_match"),
+                     "valid": verdict.get("valid"), "validated": verdict.get("validated")}
+        if include_raw:
+            entry["raw"] = captured
+        out.append(entry)
     return {"region": region, "results": out}
 
 

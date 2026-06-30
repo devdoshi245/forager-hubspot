@@ -50,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.38 (+/debug/email-tools + /debug/phone-tools: run EACH tool's real adapter through real extraction + validation, no first-success stop, no HubSpot write, ?tools= filter to test only specific tools. Upcell payload fixed to FLAT camelCase top-level fields (the `contact` nesting was wrong; live 422 confirmed it wants linkedinUrl/firstName/lastName/companyDomain/email flat). +/debug/phone-waterfall: runs the full region-aware phone waterfall + Trestle for a person without writing to HubSpot or skipping when a phone exists — lets us confirm the phone tools even when Forager always supplies a phone. Fixed the phone-provider adapters that returned nothing: Upcell now nests identity in a `contact` object (was flat -> empty); Wiza requests enrichment_level=full to actually return phones (DEEPLINE_WIZA_LEVEL); phone extractor now prefers INTERNATIONAL/E.164 format so a bare national number (Datagma's 1718659901) keeps its +country code (+491718659901); +Wiza phone_number1/mobile_phone1 keys. Findymail/Datagma confirmed working (needed the LinkedIn URL). + full per-provider logging + extractor hardening + domain guard + seeded 422 + Trestle/ZeroBounce verdict fixes. Tier 1/2; funding via Crustdata; region-aware phone waterfalls. Deepline dormant unless DEEPLINE_API_KEY)"
+BUILD = "v3.39 (+?raw=1 on the test endpoints surfaces each provider's full JSON, to verify extraction picks the RIGHT value (e.g. the target-domain email when a tool returns several). +/debug/email-tools + /debug/phone-tools: run EACH tool's real adapter through real extraction + validation, no first-success stop, no HubSpot write, ?tools= filter to test only specific tools. Upcell payload fixed to FLAT camelCase top-level fields (the `contact` nesting was wrong; live 422 confirmed it wants linkedinUrl/firstName/lastName/companyDomain/email flat). +/debug/phone-waterfall: runs the full region-aware phone waterfall + Trestle for a person without writing to HubSpot or skipping when a phone exists — lets us confirm the phone tools even when Forager always supplies a phone. Fixed the phone-provider adapters that returned nothing: Upcell now nests identity in a `contact` object (was flat -> empty); Wiza requests enrichment_level=full to actually return phones (DEEPLINE_WIZA_LEVEL); phone extractor now prefers INTERNATIONAL/E.164 format so a bare national number (Datagma's 1718659901) keeps its +country code (+491718659901); +Wiza phone_number1/mobile_phone1 keys. Findymail/Datagma confirmed working (needed the LinkedIn URL). + full per-provider logging + extractor hardening + domain guard + seeded 422 + Trestle/ZeroBounce verdict fixes. Tier 1/2; funding via Crustdata; region-aware phone waterfalls. Deepline dormant unless DEEPLINE_API_KEY)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
@@ -401,8 +401,9 @@ def debug_email_tools():
              &linkedin_url=https://www.linkedin.com/in/malteubl&tools=contactout,crustdata"""
     a = {**(request.get_json(silent=True) or {}), **request.args.to_dict()}
     inp = _person_inp(a)
+    raw = str(a.get("raw", "")).lower() in ("1", "true", "yes", "on")
     return jsonify({"deepline_enabled": deepline.is_enabled(), "input": inp,
-                    "tools": deepline.test_email_tools(inp, _only_tools(a))}), 200
+                    "tools": deepline.test_email_tools(inp, _only_tools(a), include_raw=raw)}), 200
 
 
 @app.route("/debug/phone-tools", methods=["GET", "POST"])
@@ -417,8 +418,9 @@ def debug_phone_tools():
              &tools=wiza,prospeo,contactout,upcell,findymail"""
     a = {**(request.get_json(silent=True) or {}), **request.args.to_dict()}
     inp = _person_inp(a)
+    raw = str(a.get("raw", "")).lower() in ("1", "true", "yes", "on")
     return jsonify({"deepline_enabled": deepline.is_enabled(), "input": inp,
-                    "phone": deepline.test_phone_tools(inp, _only_tools(a))}), 200
+                    "phone": deepline.test_phone_tools(inp, _only_tools(a), include_raw=raw)}), 200
 
 
 @app.route("/enrich/find-contacts", methods=["POST"])
