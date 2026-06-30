@@ -887,35 +887,84 @@ def _parse_money(value) -> float | None:
         return None
 
 
+def _human_money(n) -> str:
+    """863000000 -> '863M', 1200000000 -> '1.2B', 500000 -> '500K'."""
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return str(n)
+    if n >= 1e9:
+        return f"{n / 1e9:.2f}".rstrip("0").rstrip(".") + "B"
+    if n >= 1e6:
+        return f"{n / 1e6:.1f}".rstrip("0").rstrip(".") + "M"
+    if n >= 1e3:
+        return f"{n / 1e3:.0f}K"
+    return f"{n:.0f}"
+
+
+def _pretty_round(r) -> str:
+    """'series_f' -> 'Series F'."""
+    return str(r).replace("_", " ").strip().title()
+
+
+def _crustdata_pick_company(companies: list, domain: str) -> dict:
+    """A domain can return several Crustdata records (e.g. the real 'Vercel' plus a tiny
+    'Vercel Corp' / namesake). Pick the real one: prefer an exact website-domain match,
+    then the largest headcount, then the most funding."""
+    cands = [c for c in companies if isinstance(c, dict)]
+    if not cands:
+        return {}
+    d = (domain or "").lower().lstrip("/").replace("www.", "")
+
+    def score(c):
+        emp = ((c.get("employee_metrics") or {}).get("latest_count")) or 0
+        fund = c.get("crunchbase_total_investment_usd") or 0
+        dom_ok = str(c.get("company_website_domain") or "").lower().replace("www.", "") == d
+        return (1 if dom_ok else 0, emp, fund)
+
+    return max(cands, key=score)
+
+
 def get_company_funding(domain: str | None, name: str | None = None) -> dict:
     """Return {"display": str|None, "amount": float|None} for a company's funding.
-    `display` -> HubSpot Funding field; `amount` (USD) -> the Tier-1 rule. Uses
-    Crustdata by default (per client), configurable via DEEPLINE_FUNDING_TOOL."""
+    `display` -> HubSpot Funding field; `amount` (USD) -> the Tier-1 rule.
+
+    Funding lives in Crustdata's company-DB SCREENER (crustdata_companydb_search) — the
+    enrich tool returns firmographics only. We filter by website domain, pick the real
+    company among any same-domain namesakes, and read crunchbase_total_investment_usd /
+    last_funding_round_type / last_funding_date. Source overridable via DEEPLINE_FUNDING_TOOL."""
     if not is_enabled() or not (domain or name):
         return {"display": None, "amount": None}
-    tool = os.environ.get("DEEPLINE_FUNDING_TOOL") or "crustdata_company_enrichment"
-    payload = {}
-    if domain:
-        payload["companyDomain"] = domain   # Crustdata uses camelCase
-        payload["company_domain"] = domain
-        payload["domain"] = domain
-    if name:
-        payload["company_name"] = name
-        payload["name"] = name
-    data = execute_tool(tool, payload)
-    if not data:
-        return {"display": None, "amount": None}
-    total = _first(data, ("total_funding_usd", "total_funding", "total_funding_amount",
-                          "funding_total", "total_raised", "funding_amount", "funding"))
-    last_round = _first(data, ("last_funding_type", "latest_round", "last_round", "funding_stage"))
-    last_date = _first(data, ("last_funding_date", "latest_funding_date"))
+    tool = os.environ.get("DEEPLINE_FUNDING_TOOL") or "crustdata_companydb_search"
+
+    if "companydb_search" in tool:
+        if domain:
+            payload = {"filters": [{"filter_type": "company_website_domain", "type": "=", "value": domain}], "limit": 5}
+        else:
+            payload = {"filters": [{"filter_type": "company_name", "type": "(.)", "value": name}], "limit": 5}
+        data = execute_tool(tool, payload)
+        companies = _first(data, ("companies",))
+        rec = _crustdata_pick_company(companies if isinstance(companies, list) else [], domain or "")
+        total = rec.get("crunchbase_total_investment_usd")
+        last_round = rec.get("last_funding_round_type")
+        last_date = rec.get("last_funding_date")
+    else:
+        # Other funding sources (flat payload) — e.g. a per-domain enrich tool.
+        payload = {k: v for k, v in {"companyDomain": domain, "company_domain": domain,
+                                     "domain": domain, "company_name": name, "name": name}.items() if v}
+        data = execute_tool(tool, payload)
+        total = _first(data, ("crunchbase_total_investment_usd", "total_funding_usd", "total_funding",
+                              "total_funding_amount", "funding_total", "total_raised", "funding_amount"))
+        last_round = _first(data, ("last_funding_round_type", "last_funding_type", "funding_stage", "latest_round"))
+        last_date = _first(data, ("last_funding_date", "latest_funding_date"))
+
     amount = _parse_money(total)
     parts = []
-    if total:
-        parts.append(f"Total: {total}")
+    if amount:
+        parts.append(f"Total raised: ${_human_money(amount)}")
     if last_round:
-        parts.append(f"Last round: {last_round}")
+        parts.append(f"Last round: {_pretty_round(last_round)}")
     if last_date:
-        parts.append(str(last_date))
-    display = " | ".join(str(p) for p in parts) if parts else _first(data, ("summary", "description"))
-    return {"display": str(display) if display else None, "amount": amount}
+        parts.append(str(last_date)[:10])  # trim the T00:00:00
+    display = " | ".join(parts) if parts else None
+    return {"display": display, "amount": amount}
