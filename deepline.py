@@ -297,40 +297,63 @@ def _first(obj, keys: tuple):
     return None
 
 
-def _extract_email(obj) -> str | None:
-    if obj is None:
-        return None
-    # 1) Preferred work-email keys first.
-    for key in ("most_probable_work_email", "work_email", "professional_email",
-                "business_email", "email", "email_address"):
-        val = _first(obj, (key,))
-        email = _coerce_email(val)
-        if email:
-            return email
-    # 2) Anything that looks like an email anywhere in the response.
-    for _, v in _walk(obj):
-        email = _coerce_email(v)
-        if email:
-            return email
-    return None
-
-
-def _coerce_email(val) -> str | None:
+def _emails_from(val) -> list:
+    """All email addresses found in a value (handles strings, dicts, and lists)."""
+    out = []
     if isinstance(val, str):
-        m = _EMAIL_RE.search(val)
-        return m.group(0) if m else None
-    if isinstance(val, dict):
+        out.extend(_EMAIL_RE.findall(val))
+    elif isinstance(val, dict):
         for key in ("email", "value", "address", "most_probable_work_email"):
             if val.get(key):
-                return _coerce_email(val[key])
-    if isinstance(val, list) and val:
-        return _coerce_email(val[0])
-    return None
+                out.extend(_emails_from(val[key]))
+    elif isinstance(val, list):
+        for item in val:
+            out.extend(_emails_from(item))
+    return out
 
 
-# Keys whose values are NEVER phone numbers — skip them in the greedy fallback so a
-# date / id / score / count is never mistaken for a phone (e.g. a verification date
-# "2026-06-29" would otherwise coerce to "20260629").
+def _same_company(email: str, domain: str) -> bool:
+    """True if `email`'s domain matches the target company `domain` (exact / sub / parent)."""
+    if not domain or "@" not in (email or ""):
+        return False
+    ed = email.rsplit("@", 1)[1].lower().strip().replace("www.", "")
+    d = domain.lower().strip().lstrip("/").replace("www.", "")
+    return bool(ed) and (ed == d or ed.endswith("." + d) or d.endswith("." + ed))
+
+
+def _extract_email(obj, prefer_domain: str | None = None) -> str | None:
+    if obj is None:
+        return None
+    # Collect candidate emails in priority order: documented work-email keys first,
+    # then any other email field, then any email-looking string anywhere.
+    candidates = []
+    for key in ("most_probable_work_email", "work_email", "professional_email",
+                "business_email", "email", "email_address"):
+        wanted = key.lower()
+        for k, v in _walk(obj):
+            if isinstance(k, str) and k.lower() == wanted:
+                candidates.extend(_emails_from(v))
+    if not candidates:
+        for _, v in _walk(obj):
+            if isinstance(v, str):
+                candidates.extend(_EMAIL_RE.findall(v))
+    seen, ordered = set(), []
+    for e in candidates:
+        el = e.lower()
+        if el not in seen:
+            seen.add(el)
+            ordered.append(e)
+    if not ordered:
+        return None
+    # When a provider returns SEVERAL emails (e.g. ContactOut returns jsconf.eu AND
+    # vercel.com), PREFER the one at the target company's domain over just the first.
+    if prefer_domain:
+        for e in ordered:
+            if _same_company(e, prefer_domain):
+                return e
+    return ordered[0]
+
+
 # Keys whose values are NEVER phone numbers — skip them in the greedy fallback so a
 # date / id / score / count / URL is never mistaken for a phone (e.g. a verification
 # date "2026-06-29" -> "20260629", or a timestamp inside a logo URL).
@@ -449,13 +472,13 @@ def _identity(inp: dict, extra: dict | None = None) -> dict:
 
 
 # --- EMAIL finder adapters: each returns a candidate email or None ---
-def _email_hunter(inp):       return _extract_email(execute_tool("hunter_email_finder", _identity(inp)))
-def _email_leadmagic(inp):    return _extract_email(execute_tool("leadmagic_email_finder", _identity(inp)))
-def _email_prospeo(inp):      return _extract_email(execute_tool("prospeo_enrich_person", _identity(inp)))
-def _email_contactout(inp):   return _extract_email(execute_tool("contactout_enrich_person", _identity(inp, {"include": ["work_email"]})))
-def _email_pdl(inp):          return _extract_email(execute_tool("peopledatalabs_enrich_contact", _identity(inp)))
-def _email_crustdata(inp):    return _extract_email(execute_tool("crustdata_person_enrichment", _identity(inp)))
-def _email_lusha(inp):        return _extract_email(execute_tool("lusha_enrich_person", _identity(inp, {"reveal_emails": True})))
+def _email_hunter(inp):       return _extract_email(execute_tool("hunter_email_finder", _identity(inp)), inp.get("domain"))
+def _email_leadmagic(inp):    return _extract_email(execute_tool("leadmagic_email_finder", _identity(inp)), inp.get("domain"))
+def _email_prospeo(inp):      return _extract_email(execute_tool("prospeo_enrich_person", _identity(inp)), inp.get("domain"))
+def _email_contactout(inp):   return _extract_email(execute_tool("contactout_enrich_person", _identity(inp, {"include": ["work_email"]})), inp.get("domain"))
+def _email_pdl(inp):          return _extract_email(execute_tool("peopledatalabs_enrich_contact", _identity(inp)), inp.get("domain"))
+def _email_crustdata(inp):    return _extract_email(execute_tool("crustdata_person_enrichment", _identity(inp)), inp.get("domain"))
+def _email_lusha(inp):        return _extract_email(execute_tool("lusha_enrich_person", _identity(inp, {"reveal_emails": True})), inp.get("domain"))
 
 
 def _email_icypeas(inp):
@@ -463,8 +486,8 @@ def _email_icypeas(inp):
     submitted = execute_tool("icypeas_email_search", _identity(inp))
     job_id = _first(submitted, ("_id", "id", "task_id"))
     if not job_id:
-        return _extract_email(submitted)
-    return _extract_email(_poll("icypeas_read_results", {"_id": job_id}))
+        return _extract_email(submitted, inp.get("domain"))
+    return _extract_email(_poll("icypeas_read_results", {"_id": job_id}), inp.get("domain"))
 
 
 def _email_fullenrich(inp):
@@ -473,8 +496,8 @@ def _email_fullenrich(inp):
     submitted = execute_tool("fullenrich_bulk_enrich", {"name": "forager-hubspot", "data": [row]})
     job_id = _first(submitted, ("enrichment_id", "id"))
     if not job_id:
-        return _extract_email(submitted)
-    return _extract_email(_poll("fullenrich_get_result", {"enrichment_id": job_id, "forceResults": True}))
+        return _extract_email(submitted, inp.get("domain"))
+    return _extract_email(_poll("fullenrich_get_result", {"enrichment_id": job_id, "forceResults": True}), inp.get("domain"))
 
 
 _EMAIL_ADAPTERS = {
@@ -729,9 +752,7 @@ def _email_domain_ok(email: str, domain: str) -> bool:
         return True
     if not domain or "@" not in (email or ""):
         return True
-    ed = email.rsplit("@", 1)[1].lower().strip().replace("www.", "")
-    d = domain.lower().strip().lstrip("/").replace("www.", "")
-    return bool(ed) and (ed == d or ed.endswith("." + d) or d.endswith("." + ed))
+    return _same_company(email, domain)
 
 
 def run_email_waterfall(inp: dict) -> dict:
