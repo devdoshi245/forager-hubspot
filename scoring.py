@@ -26,8 +26,12 @@ import time
 logger = logging.getLogger(__name__)
 
 _ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
-# Anthropic server-side web search tool (Claude runs the searches itself).
-_WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 5}
+# Anthropic server-side web search tool (Claude runs the searches itself). max_uses is a
+# CAP on how many searches the logo step may run — lowered 5 -> 2 to cut the slowest part
+# of scoring (well-known brands resolve in 1-2; only very obscure ones would want more,
+# and those score low anyway). Override via SCORING_WEB_SEARCH_MAX_USES if needed.
+_WEB_SEARCH_MAX_USES = int(os.environ.get("SCORING_WEB_SEARCH_MAX_USES", "2"))
+_WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": _WEB_SEARCH_MAX_USES}
 
 # ---------------------------------------------------------------------------
 # Product-owned scoring prompts (verbatim). Model must return ONLY JSON.
