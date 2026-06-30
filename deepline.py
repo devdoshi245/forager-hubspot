@@ -376,8 +376,10 @@ def _extract_phone(obj) -> str | None:
     #    (+49 171 8659901). Then the common keys; then provider-specific ones (Wiza
     #    phone_number1/mobile_phone1). Bare digits are allowed here (trusted keys).
     for key in ("displayinternational", "phone_international", "international", "e164",
-                "mobile_international", "mobile", "mobile_phone", "mobile_number",
-                "phone", "phone_number", "direct_dial", "number", "phones", "phone_numbers",
+                "mobile_international", "mobile", "mobile_phone", "mobilephone",
+                "mobile_number", "mobilenumber", "cell", "cell_phone", "cellphone",
+                "phone", "phone_number", "phonenumber", "direct_dial", "directdial",
+                "number", "phones", "phone_numbers", "phonenumbers", "mobile_phones",
                 "mobile_phone1", "phone_number1", "mobile_phone2", "phone_number2"):
         val = _first(obj, (key,))
         phone = _coerce_phone(val)
