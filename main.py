@@ -50,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.37 (Upcell payload fixed to FLAT camelCase top-level fields (the `contact` nesting was wrong; live 422 confirmed it wants linkedinUrl/firstName/lastName/companyDomain/email flat). +/debug/phone-waterfall: runs the full region-aware phone waterfall + Trestle for a person without writing to HubSpot or skipping when a phone exists — lets us confirm the phone tools even when Forager always supplies a phone. Fixed the phone-provider adapters that returned nothing: Upcell now nests identity in a `contact` object (was flat -> empty); Wiza requests enrichment_level=full to actually return phones (DEEPLINE_WIZA_LEVEL); phone extractor now prefers INTERNATIONAL/E.164 format so a bare national number (Datagma's 1718659901) keeps its +country code (+491718659901); +Wiza phone_number1/mobile_phone1 keys. Findymail/Datagma confirmed working (needed the LinkedIn URL). + full per-provider logging + extractor hardening + domain guard + seeded 422 + Trestle/ZeroBounce verdict fixes. Tier 1/2; funding via Crustdata; region-aware phone waterfalls. Deepline dormant unless DEEPLINE_API_KEY)"
+BUILD = "v3.38 (+/debug/email-tools + /debug/phone-tools: run EACH tool's real adapter through real extraction + validation, no first-success stop, no HubSpot write, ?tools= filter to test only specific tools. Upcell payload fixed to FLAT camelCase top-level fields (the `contact` nesting was wrong; live 422 confirmed it wants linkedinUrl/firstName/lastName/companyDomain/email flat). +/debug/phone-waterfall: runs the full region-aware phone waterfall + Trestle for a person without writing to HubSpot or skipping when a phone exists — lets us confirm the phone tools even when Forager always supplies a phone. Fixed the phone-provider adapters that returned nothing: Upcell now nests identity in a `contact` object (was flat -> empty); Wiza requests enrichment_level=full to actually return phones (DEEPLINE_WIZA_LEVEL); phone extractor now prefers INTERNATIONAL/E.164 format so a bare national number (Datagma's 1718659901) keeps its +country code (+491718659901); +Wiza phone_number1/mobile_phone1 keys. Findymail/Datagma confirmed working (needed the LinkedIn URL). + full per-provider logging + extractor hardening + domain guard + seeded 422 + Trestle/ZeroBounce verdict fixes. Tier 1/2; funding via Crustdata; region-aware phone waterfalls. Deepline dormant unless DEEPLINE_API_KEY)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
@@ -365,9 +365,15 @@ def debug_phone_waterfall():
     Example: ?first_name=Malte&last_name=Ubl&domain=vercel.com&country=United States
              &linkedin_url=https://www.linkedin.com/in/malteubl&email=malte@vercel.com
     Spends provider credits (it actually runs the waterfall)."""
-    a = {**(request.get_json(silent=True) or {}), **request.args.to_dict()}
+    inp = _person_inp({**(request.get_json(silent=True) or {}), **request.args.to_dict()})
+    result = deepline.run_phone_waterfall(inp) if deepline.is_enabled() else {}
+    return jsonify({"deepline_enabled": deepline.is_enabled(), "input": inp, "result": result}), 200
+
+
+def _person_inp(a: dict) -> dict:
+    """Build the enrichment input dict from request args (shared by the debug endpoints)."""
     first, last = a.get("first_name", ""), a.get("last_name", "")
-    inp = {
+    return {
         "first_name": first, "last_name": last,
         "full_name": a.get("full_name") or f"{first} {last}".strip(),
         "domain": forager.normalize_domain(a.get("domain", "")),
@@ -376,8 +382,43 @@ def debug_phone_waterfall():
         "email": a.get("email", ""),
         "country": a.get("country", ""),
     }
-    result = deepline.run_phone_waterfall(inp) if deepline.is_enabled() else {}
-    return jsonify({"deepline_enabled": deepline.is_enabled(), "input": inp, "result": result}), 200
+
+
+def _only_tools(a: dict):
+    """Optional ?tools=a,b,c filter — limits which tools run (to save credits)."""
+    raw = (a.get("tools") or "").strip()
+    return [t.strip() for t in raw.split(",") if t.strip()] or None
+
+
+@app.route("/debug/email-tools", methods=["GET", "POST"])
+@require_secret
+def debug_email_tools():
+    """Run EACH email tool's real adapter (with its correct reveal flags) through the
+    real extraction + ZeroBounce + domain check — without stopping at the first success
+    and without writing to HubSpot. Confirms every tool individually. Use ?tools=a,b to
+    test only specific tools (saves credits). Spends provider credits.
+    Example: ?first_name=Malte&last_name=Ubl&domain=vercel.com
+             &linkedin_url=https://www.linkedin.com/in/malteubl&tools=contactout,crustdata"""
+    a = {**(request.get_json(silent=True) or {}), **request.args.to_dict()}
+    inp = _person_inp(a)
+    return jsonify({"deepline_enabled": deepline.is_enabled(), "input": inp,
+                    "tools": deepline.test_email_tools(inp, _only_tools(a))}), 200
+
+
+@app.route("/debug/phone-tools", methods=["GET", "POST"])
+@require_secret
+def debug_phone_tools():
+    """Run EACH phone tool's real adapter (with its correct reveal flags) through real
+    extraction + Trestle (region-based) — without stopping at the first success and
+    without writing to HubSpot. Use ?tools=a,b to test only specific tools (saves
+    credits). Spends provider credits.
+    Example: ?first_name=Malte&last_name=Ubl&domain=vercel.com&country=United States
+             &linkedin_url=https://www.linkedin.com/in/malteubl&email=malte@vercel.com
+             &tools=wiza,prospeo,contactout,upcell,findymail"""
+    a = {**(request.get_json(silent=True) or {}), **request.args.to_dict()}
+    inp = _person_inp(a)
+    return jsonify({"deepline_enabled": deepline.is_enabled(), "input": inp,
+                    "phone": deepline.test_phone_tools(inp, _only_tools(a))}), 200
 
 
 @app.route("/enrich/find-contacts", methods=["POST"])

@@ -752,6 +752,66 @@ def run_phone_waterfall(inp: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Per-tool test harness (for the /debug/email-tools + /debug/phone-tools endpoints).
+# Runs EACH tool's real adapter (with its correct reveal flags) through the real
+# extraction + validation, WITHOUT stopping at the first success and WITHOUT writing
+# to HubSpot. `only` (a list of tool keys) limits which tools run — pass it to confirm
+# just the unverified ones and avoid spending on tools already proven.
+# ---------------------------------------------------------------------------
+def test_email_tools(inp: dict, only: list | None = None) -> list:
+    if not is_enabled():
+        return []
+    keys = list(only) if only else _order("DEEPLINE_EMAIL_ORDER", _DEFAULT_EMAIL_ORDER)
+    domain = inp.get("domain") or ""
+    out = []
+    for key in keys:
+        adapter = _EMAIL_ADAPTERS.get(key)
+        if adapter is None:
+            out.append({"tool": key, "error": "unknown tool"})
+            continue
+        try:
+            raw = adapter(inp)
+        except Exception as exc:  # noqa: BLE001
+            out.append({"tool": key, "found": False, "error": str(exc)})
+            continue
+        if not raw:
+            out.append({"tool": key, "found": False})
+            continue
+        verdict = validate_email(raw.lower().strip())
+        dom_ok = _email_domain_ok(raw, domain)
+        out.append({"tool": key, "email": raw, "zerobounce": verdict.get("status"),
+                    "valid": verdict.get("valid"), "domain_ok": dom_ok,
+                    "accepted": bool(verdict.get("valid") and dom_ok)})
+    return out
+
+
+def test_phone_tools(inp: dict, only: list | None = None) -> dict:
+    if not is_enabled():
+        return {}
+    region = _region_for_country(inp.get("country"))
+    keys = list(only) if only else _phone_order_for_region(region)
+    name = inp.get("full_name") or ""
+    out = []
+    for key in keys:
+        adapter = _PHONE_ADAPTERS.get(key)
+        if adapter is None:
+            out.append({"tool": key, "error": "unknown tool"})
+            continue
+        try:
+            raw = adapter(inp)
+        except Exception as exc:  # noqa: BLE001
+            out.append({"tool": key, "found": False, "error": str(exc)})
+            continue
+        if not raw:
+            out.append({"tool": key, "found": False})
+            continue
+        verdict = validate_phone(re.sub(r"\D", "", raw), name, region)
+        out.append({"tool": key, "phone": raw, "name_match": verdict.get("name_match"),
+                    "valid": verdict.get("valid"), "validated": verdict.get("validated")})
+    return {"region": region, "results": out}
+
+
+# ---------------------------------------------------------------------------
 # Company funding
 # ---------------------------------------------------------------------------
 def _parse_money(value) -> float | None:
