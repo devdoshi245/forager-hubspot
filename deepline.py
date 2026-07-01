@@ -670,9 +670,46 @@ def validate_phone(phone: str, name: str, region: str = "namer") -> dict:
     return {
         "valid": not rejected, "validated": True, "region": region, "name_match": nm,
         # Metadata only — surfaced to HubSpot, never used to accept/reject.
+        "is_valid": _first(data, ("phone.is_valid", "is_valid")),
         "activity_score": _first(data, ("phone.activity_score", "activity_score")),
         "line_type": _first(data, ("phone.linetype", "phone.line_type", "linetype", "line_type")),
     }
+
+
+# Display names for the enrichment providers (the waterfall's `winner` key -> label).
+_PROVIDER_DISPLAY = {
+    "pdl": "PDL", "upcell": "Upcell", "wiza": "Wiza", "prospeo": "Prospeo",
+    "datagma": "Datagma", "findymail": "Findymail", "contactout": "ContactOut",
+    "leadmagic": "LeadMagic", "hunter": "Hunter", "lusha": "Lusha", "crustdata": "Crustdata",
+}
+
+
+def provider_display(key: str) -> str:
+    """'pdl' -> 'PDL', 'upcell' -> 'Upcell'. Falls back to a title-cased key."""
+    return _PROVIDER_DISPLAY.get((key or "").lower(), (key or "").replace("_", " ").title())
+
+
+def phone_geo(phone: str) -> tuple:
+    """(country_name, calling_code) for an E.164 phone, e.g. '+919581999660' ->
+    ('India', '+91'). Best-effort via the `phonenumbers` lib; ('', '') if unavailable
+    or unparseable (never raises)."""
+    try:
+        import phonenumbers
+        p = phonenumbers.parse(phone, None)
+        cc = "+%d" % p.country_code if p.country_code else ""
+        iso = phonenumbers.region_code_for_number(p) or ""   # 'IN', 'US', 'AE', 'DE'
+        country = iso
+        if iso:
+            try:
+                import pycountry
+                rec = pycountry.countries.get(alpha_2=iso)
+                if rec:
+                    country = rec.name                        # 'India', 'United States'
+            except Exception:  # noqa: BLE001 — fall back to the ISO code
+                pass
+        return country, cc
+    except Exception:  # noqa: BLE001 — geo is best-effort metadata, never fatal
+        return "", ""
 
 
 # ---------------------------------------------------------------------------

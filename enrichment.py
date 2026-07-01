@@ -671,15 +671,31 @@ def workflow3_deepline(hubspot_contact_id: str) -> dict:
             update["email_smtp_provider"] = email_res["meta"]["smtp_provider"]
     if phone_res.get("value"):
         meta = phone_res.get("meta") or {}
-        update["phone"] = phone_res["value"]
+        phone_val = phone_res["value"]
+        update["phone"] = phone_val
+        # Which provider resolved it (pdl -> "PDL", upcell -> "Upcell", ...).
+        winner = phone_res.get("winner")
+        if winner:
+            update["phone_enrichment_provider"] = deepline.provider_display(winner)
+        # Country + calling code, derived from the NUMBER itself — works for ALL regions
+        # (not just NAMER), which is why these were blank before.
+        country, calling_code = deepline.phone_geo(phone_val)
+        if country:
+            update["phone_country"] = country
+        if calling_code:
+            update["phone_calling_code"] = calling_code
+        # Trestle name-match + validity — only present when validation actually ran
+        # (NAMER); left blank for other regions where Trestle isn't called.
+        if meta.get("validated"):
+            nm = meta.get("name_match")
+            update["phone_name_match"] = "true" if nm is True else ("false" if nm is False else "unknown")
+            iv = meta.get("is_valid")
+            if iv is not None:
+                update["phone_validity"] = "valid" if iv in (True, "true", "True", "valid") else "invalid"
         if meta.get("activity_score") is not None:
             update["phone_activity_score"] = meta["activity_score"]
         if meta.get("line_type"):
             update["phone_line_type"] = meta["line_type"]
-        if meta.get("country"):
-            update["phone_country"] = meta["country"]
-        if meta.get("calling_code"):
-            update["phone_calling_code"] = meta["calling_code"]
 
     hubspot.update_contact(hubspot_contact_id, update)
     return {
