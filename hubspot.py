@@ -82,6 +82,7 @@ _CONTACT_CUSTOM_PROPS = [
 # Deepline / Workflow 3 contact properties. Created ONLY when DEEPLINE_API_KEY is set
 # (see ensure_custom_properties), so an account with Deepline off gets zero new fields.
 _DEEPLINE_CONTACT_PROPS = [
+    ("email_enrichment_provider", "Email Enrichment Provider"),
     ("email_smtp_provider", "Email SMTP Provider"),
     ("phone_enrichment_provider", "Phone Enrichment Provider"),
     ("phone_name_match", "Phone Name Match"),

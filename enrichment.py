@@ -667,6 +667,11 @@ def workflow3_deepline(hubspot_contact_id: str) -> dict:
     update: dict = {"deepline_enriched": "true"}
     if email_res.get("value"):
         update["email"] = email_res["value"]  # work email -> built-in Email field
+        # Which provider found the work email (hunter -> "Hunter", pdl -> "PDL", ...).
+        # Only set on a Deepline work-email resolve (this block); never for Forager.
+        winner = email_res.get("winner")
+        if winner:
+            update["email_enrichment_provider"] = deepline.provider_display(winner)
         if (email_res.get("meta") or {}).get("smtp_provider"):
             update["email_smtp_provider"] = email_res["meta"]["smtp_provider"]
     if phone_res.get("value"):
