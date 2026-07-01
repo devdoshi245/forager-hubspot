@@ -926,15 +926,18 @@ def _crustdata_pick_company(companies: list, domain: str) -> dict:
 
 
 def get_company_funding(domain: str | None, name: str | None = None) -> dict:
-    """Return {"display": str|None, "amount": float|None} for a company's funding.
-    `display` -> HubSpot Funding field; `amount` (USD) -> the Tier-1 rule.
+    """Return the granular funding pieces for a company (each None if unavailable):
+        total           -> TOTAL funding raised     (crunchbase_total_investment_usd)
+        last_amount     -> the MOST RECENT round size (last_funding_round_investment_usd)
+        last_date       -> the most recent funding date, YYYY-MM-DD
+        last_round_type -> the most recent round type, prettified ('Series F', 'Post Ipo Debt')
 
     Funding lives in Crustdata's company-DB SCREENER (crustdata_companydb_search) — the
     enrich tool returns firmographics only. We filter by website domain, pick the real
-    company among any same-domain namesakes, and read crunchbase_total_investment_usd /
-    last_funding_round_type / last_funding_date. Source overridable via DEEPLINE_FUNDING_TOOL."""
+    company among any same-domain namesakes. Source overridable via DEEPLINE_FUNDING_TOOL."""
+    blank = {"total": None, "last_amount": None, "last_date": None, "last_round_type": None}
     if not is_enabled() or not (domain or name):
-        return {"display": None, "amount": None}
+        return blank
     tool = os.environ.get("DEEPLINE_FUNDING_TOOL") or "crustdata_companydb_search"
 
     if "companydb_search" in tool:
@@ -946,6 +949,7 @@ def get_company_funding(domain: str | None, name: str | None = None) -> dict:
         companies = _first(data, ("companies",))
         rec = _crustdata_pick_company(companies if isinstance(companies, list) else [], domain or "")
         total = rec.get("crunchbase_total_investment_usd")
+        last_amount = rec.get("last_funding_round_investment_usd")
         last_round = rec.get("last_funding_round_type")
         last_date = rec.get("last_funding_date")
     else:
@@ -955,16 +959,14 @@ def get_company_funding(domain: str | None, name: str | None = None) -> dict:
         data = execute_tool(tool, payload)
         total = _first(data, ("crunchbase_total_investment_usd", "total_funding_usd", "total_funding",
                               "total_funding_amount", "funding_total", "total_raised", "funding_amount"))
+        last_amount = _first(data, ("last_funding_round_investment_usd", "last_funding_amount",
+                                    "last_round_amount", "latest_funding_amount"))
         last_round = _first(data, ("last_funding_round_type", "last_funding_type", "funding_stage", "latest_round"))
         last_date = _first(data, ("last_funding_date", "latest_funding_date"))
 
-    amount = _parse_money(total)
-    parts = []
-    if amount:
-        parts.append(f"Total raised: ${_human_money(amount)}")
-    if last_round:
-        parts.append(f"Last round: {_pretty_round(last_round)}")
-    if last_date:
-        parts.append(str(last_date)[:10])  # trim the T00:00:00
-    display = " | ".join(parts) if parts else None
-    return {"display": display, "amount": amount}
+    return {
+        "total": _parse_money(total),
+        "last_amount": _parse_money(last_amount),
+        "last_date": (str(last_date)[:10] if last_date else None),  # trim any T00:00:00
+        "last_round_type": (_pretty_round(last_round) if last_round else None),
+    }

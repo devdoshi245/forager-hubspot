@@ -143,17 +143,33 @@ def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
     score_fields = scores.get("hubspot_fields", {}) or {}
 
     # Company Funding via Deepline (Crustdata). Only when enabled and the Funding field
-    # is still empty. We also keep the numeric amount (USD) in `funding_amount` so the
-    # Tier rule below can use it on this and future runs. No-op when Deepline is off.
-    funding_amount = _to_float(props.get("funding_amount"))
+    # is still empty. The client's 4 funding fields map as follows:
+    #   Funding (text)              <- most recent funding DATE
+    #   Funding Amount (USD) (num)  <- most recent ROUND amount
+    #   Total Funding (num)         <- TOTAL funding raised
+    #   Most Recent Funding Type    <- most recent round type
+    # The last two are existing (Pipedrive) fields; resolve their internal names by label
+    # (overridable via env). The Tier-1 size check uses the TOTAL funding. No-op when off.
+    tier_funding = _to_float(props.get("funding_amount"))  # fallback if the lookup is skipped
+    total_field = os.environ.get("FUNDING_TOTAL_FIELD") or hubspot.company_property_name_by_label("Total Funding")
+    type_field = os.environ.get("FUNDING_TYPE_FIELD") or hubspot.company_property_name_by_label("Most Recent Funding Type")
     if deepline.is_enabled() and not (props.get("funding") or "").strip():
         try:
             fr = deepline.get_company_funding(fields.get("domain") or domain, fields.get("name") or name)
-            if fr.get("display"):
-                fields["funding"] = fr["display"]
-            if fr.get("amount") is not None:
-                fields["funding_amount"] = fr["amount"]
-                funding_amount = fr["amount"]
+            if fr.get("last_date"):
+                fields["funding"] = fr["last_date"]                 # Funding (text) <- last funding date
+            if fr.get("last_amount") is not None:
+                fields["funding_amount"] = fr["last_amount"]        # Funding Amount (USD) <- last round amount
+            if total_field and fr.get("total") is not None:
+                fields[total_field] = fr["total"]                   # Total Funding <- total raised
+            if type_field and fr.get("last_round_type"):
+                fields[type_field] = fr["last_round_type"]          # Most Recent Funding Type <- last round type
+            if fr.get("total") is not None:
+                tier_funding = fr["total"]                          # Tier-1 size check uses TOTAL funding
+            if not total_field:
+                logger.warning("Could not resolve the 'Total Funding' field by label; skipped it.")
+            if not type_field:
+                logger.warning("Could not resolve the 'Most Recent Funding Type' field by label; skipped it.")
         except Exception as exc:  # noqa: BLE001 - funding must never break enrichment
             logger.warning("Deepline funding lookup failed for %s: %s", hubspot_company_id, exc)
 
@@ -165,7 +181,7 @@ def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
         icp_decision=score_fields.get("icp_decision"),
         logo_score=_to_float(score_fields.get("logo_score")),
         employees=_to_float(fields.get("numberofemployees")),
-        funding_amount=funding_amount,
+        funding_amount=tier_funding,
     )
     fields[os.environ.get("TIER_FIELD", "tier")] = tier
 

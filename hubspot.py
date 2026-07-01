@@ -238,6 +238,29 @@ def _existing_property_names(object_type: str) -> set[str]:
         return set()
 
 
+_company_label_to_name_cache: dict | None = None
+
+
+def company_property_name_by_label(label: str) -> str | None:
+    """Resolve a company property's INTERNAL name from its human LABEL (case-insensitive),
+    e.g. "Total Funding" -> the actual internal name (which for Pipedrive-imported fields
+    is not guessable). Cached after the first lookup. Returns None if not found."""
+    global _company_label_to_name_cache
+    if _company_label_to_name_cache is None:
+        _company_label_to_name_cache = {}
+        try:
+            resp = _SESSION.get(
+                f"{HUBSPOT_BASE}/crm/v3/properties/companies", headers=_headers(), timeout=30)
+            resp.raise_for_status()
+            for p in resp.json().get("results", []):
+                lbl, nm = (p.get("label") or "").strip().lower(), p.get("name")
+                if lbl and nm:
+                    _company_label_to_name_cache.setdefault(lbl, nm)
+        except Exception as exc:  # noqa: BLE001 — resolution is best-effort
+            logger.warning("Could not map company property labels: %s", exc)
+    return _company_label_to_name_cache.get((label or "").strip().lower())
+
+
 def _create_properties(object_type: str, group: str, props: list[tuple]) -> None:
     existing = _existing_property_names(object_type)
     for entry in props:
