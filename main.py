@@ -50,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BUILD = "v3.51 (D) SIZE-BASED PEOPLE DISCOVERY (Shirish/Ahmed 'finding people' logic): the buyer-committee discovery now scales BOTH how many people it targets and WHICH titles, by company headcount. COUNT by band (env-tunable DISCOVERY_COUNT_*): <=50 emp -> 3, <=200 -> 5, <=1000 -> 7, >1000 -> 10 (unknown headcount -> 5). TITLES by size (buyer_committee.titles_for_company): small cos (<=50) are CXO-led so the C-suite is pushed to the FRONT; large cos (>1000) SKIP the (unreachable) C-suite and lead with the VP/Head/Director layer; mid cos keep the full committee's natural Decision-Maker->Champion->Influencer priority order. MAX 1 CONTACT PER TITLE: discover_and_create_contacts now stops scanning a title after the first successful create (duplicates/already-seen people don't count, so it keeps looking within the title for a fresh person). handle_company_webhook computes the size-based target from company employees and passes it as a hard-capped effective_max (never exceeds the caller's max_contacts). Env knobs: DISCOVERY_SMALL_MAX(50)/DISCOVERY_MID_MAX(200)/DISCOVERY_LARGE_MAX(1000)/DISCOVERY_COUNT_SMALL(3)/MID(5)/LARGE(7)/XLARGE(10)/DEFAULT(5). v3.50 (A) PHONE PROVIDER = 'Forager' when Forager (Workflow 2) supplies the phone (Deepline's phone step is skipped when a phone already exists, so it would otherwise leave phone_enrichment_provider blank). (B) WORK-EMAIL NAME+DOMAIN CHECK via Claude: a Deepline email first hits the fast string domain guard; on a MATCH it skips Claude and goes straight to ZeroBounce; on a MISMATCH it escalates to Claude (client's exact Name+Domain prompt: scoring.verify_work_email) which rescues M&A rebrands/parents/subsidiaries (meta.com<->Facebook) and rejects WRONG_COMPANY/NON_WORK_EMAIL/NAME_MISMATCH/WRONG_COMPANY_AND_NAME/UNSURE (accept ONLY VALID). Verdict stored in new custom contact prop email_verification ('Email Verification') — VALID line for a saved email, or the worst rejection reason when blank. Falls back to strict string guard if Claude is unavailable. v3.49 (EMAIL ENRICHMENT PROVIDER: alongside a Deepline WORK email we now write which provider found it (hunter -> 'Hunter', pdl -> 'PDL', ...) into new custom prop email_enrichment_provider ('Email Enrichment Provider'). Only set on a Deepline work-email resolve (never for Forager). v3.48 (PHONE METADATA to HubSpot: alongside the phone number we now write the enrichment PROVIDER (winner key -> 'PDL'/'Upcell'/'Wiza'/... via deepline.provider_display), phone NAME MATCH (true/unknown/false from Trestle, NAMER-only), phone VALIDITY (Trestle phone.is_valid -> valid/invalid, NAMER-only), and finally POPULATE phone_country + phone_calling_code (previously blank) by parsing the resolved E.164 number with phonenumbers + pycountry (e.g. +919581999660 -> 'India','+91'). 3 new custom contact props auto-created: phone_enrichment_provider, phone_name_match, phone_validity (name_match/validity blank for non-NAMER where Trestle doesn't run). validate_phone now also captures phone.is_valid. New deps: phonenumbers, pycountry. v3.47 (FUNDING FIELDS REMAPPED to the client's 4 HubSpot fields: Funding (text) <- most recent funding DATE; Funding Amount (USD) <- most recent ROUND amount (last_funding_round_investment_usd); Total Funding <- TOTAL raised (crunchbase_total_investment_usd); Most Recent Funding Type <- most recent round type. get_company_funding now returns granular {total,last_amount,last_date,last_round_type}. The two Pipedrive-imported fields (Total Funding / Most Recent Funding Type) are resolved by LABEL via hubspot.company_property_name_by_label (overridable with FUNDING_TOTAL_FIELD / FUNDING_TYPE_FIELD). Tier-1 size check now uses TOTAL funding (unchanged intent). v3.46 (DUPLICATE-EMAIL 400 FIX: when the same person is discovered under two titles in one run, the second work-email write hits HubSpot's unique-email rule and HubSpot returns it as a 400 (not a 409) — our handler only caught 409, so the whole contact update aborted and NOTHING saved (Guillermo Rauch on the Vercel run: email was found, hunter=guillermo.rauch@vercel.com [valid], but the 400 wiped the save). hubspot._write_with_retry now also detects a duplicate-email 400 (_is_duplicate_email_error matches 'already exists'/'already has the value'/duplicate+email in the body) and retries WITHOUT `email`, same recovery as the existing 409 path, so the rest of the contact still lands. v3.45 (FUNDING NOW WORKS: switched company funding to Crustdata's company-DB screener crustdata_companydb_search (the Crustdata endpoint that actually carries funding) — reads crunchbase_total_investment_usd/last_funding_round_type/last_funding_date, picks the real company among same-domain namesakes by headcount, writes a clean summary (e.g. 'Total raised: $863M | Last round: Series F | 2025-09-30') + numeric amount for the Tier-1 rule. +/debug/funding?domain= probes a funding source (default Crustdata company-DB screener crustdata_companydb_search, which actually carries funding unlike the enrich tool) and returns raw JSON, to wire funding extraction. Reverted logo-step web-search cap back to 5 (speed handled via the faster ANTHROPIC_MODEL, e.g. claude-sonnet-4-6). Phone extractor now also covers camelCase/cell mobile keys (mobilePhone/mobileNumber/cell/cellphone/phonenumber) so we are prepared for Upcell-style output whose populated shape we have not directly observed. Email extraction now PREFERS the target-company email when a provider returns several — ContactOut returned [jsconf.eu, vercel.com] and we were grabbing jsconf (first) and rejecting it, throwing away the usable vercel.com address; now we pick the domain-matching one. +?raw=1 on the test endpoints surfaces each provider's full JSON, to verify extraction picks the RIGHT value (e.g. the target-domain email when a tool returns several). +/debug/email-tools + /debug/phone-tools: run EACH tool's real adapter through real extraction + validation, no first-success stop, no HubSpot write, ?tools= filter to test only specific tools. Upcell payload fixed to FLAT camelCase top-level fields (the `contact` nesting was wrong; live 422 confirmed it wants linkedinUrl/firstName/lastName/companyDomain/email flat). +/debug/phone-waterfall: runs the full region-aware phone waterfall + Trestle for a person without writing to HubSpot or skipping when a phone exists — lets us confirm the phone tools even when Forager always supplies a phone. Fixed the phone-provider adapters that returned nothing: Upcell now nests identity in a `contact` object (was flat -> empty); Wiza requests enrichment_level=full to actually return phones (DEEPLINE_WIZA_LEVEL); phone extractor now prefers INTERNATIONAL/E.164 format so a bare national number (Datagma's 1718659901) keeps its +country code (+491718659901); +Wiza phone_number1/mobile_phone1 keys. Findymail/Datagma confirmed working (needed the LinkedIn URL). + full per-provider logging + extractor hardening + domain guard + seeded 422 + Trestle/ZeroBounce verdict fixes. Tier 1/2; funding via Crustdata; region-aware phone waterfalls. Deepline dormant unless DEEPLINE_API_KEY)"
+BUILD = "v3.52 (IMPORT SAFEGUARD): a bulk HubSpot import no longer auto-triggers enrichment / burns credits. Every HubSpot creation event carries a changeSource; a CSV/spreadsheet import stamps it 'IMPORT'. All three webhook routes (/webhook, /webhook/company, /webhook/contact) now ACK import-sourced events 200 but do NOT enqueue them (_is_import_event), so importing thousands of rows costs 0 Forager/Deepline credits. Real user-created records (changeSource CRM_UI/FORM/API/INTEGRATION/...) are unaffected and still enrich normally; a missing changeSource is treated as NOT an import so genuine events are never dropped. Responses now include skipped_import count; skips are logged. Tunable: SKIP_IMPORT_WEBHOOKS (default true), IMPORT_CHANGE_SOURCES (default 'IMPORT'; widen with MIGRATION,BATCH_UPDATE,...). Pre-existing records remain the job of the separate bulk backfill tool, not the live webhook. v3.51 (D) SIZE-BASED PEOPLE DISCOVERY (Shirish/Ahmed 'finding people' logic): the buyer-committee discovery now scales BOTH how many people it targets and WHICH titles, by company headcount. COUNT by band (env-tunable DISCOVERY_COUNT_*): <=50 emp -> 3, <=200 -> 5, <=1000 -> 7, >1000 -> 10 (unknown headcount -> 5). TITLES by size (buyer_committee.titles_for_company): small cos (<=50) are CXO-led so the C-suite is pushed to the FRONT; large cos (>1000) SKIP the (unreachable) C-suite and lead with the VP/Head/Director layer; mid cos keep the full committee's natural Decision-Maker->Champion->Influencer priority order. MAX 1 CONTACT PER TITLE: discover_and_create_contacts now stops scanning a title after the first successful create (duplicates/already-seen people don't count, so it keeps looking within the title for a fresh person). handle_company_webhook computes the size-based target from company employees and passes it as a hard-capped effective_max (never exceeds the caller's max_contacts). Env knobs: DISCOVERY_SMALL_MAX(50)/DISCOVERY_MID_MAX(200)/DISCOVERY_LARGE_MAX(1000)/DISCOVERY_COUNT_SMALL(3)/MID(5)/LARGE(7)/XLARGE(10)/DEFAULT(5). v3.50 (A) PHONE PROVIDER = 'Forager' when Forager (Workflow 2) supplies the phone (Deepline's phone step is skipped when a phone already exists, so it would otherwise leave phone_enrichment_provider blank). (B) WORK-EMAIL NAME+DOMAIN CHECK via Claude: a Deepline email first hits the fast string domain guard; on a MATCH it skips Claude and goes straight to ZeroBounce; on a MISMATCH it escalates to Claude (client's exact Name+Domain prompt: scoring.verify_work_email) which rescues M&A rebrands/parents/subsidiaries (meta.com<->Facebook) and rejects WRONG_COMPANY/NON_WORK_EMAIL/NAME_MISMATCH/WRONG_COMPANY_AND_NAME/UNSURE (accept ONLY VALID). Verdict stored in new custom contact prop email_verification ('Email Verification') — VALID line for a saved email, or the worst rejection reason when blank. Falls back to strict string guard if Claude is unavailable. v3.49 (EMAIL ENRICHMENT PROVIDER: alongside a Deepline WORK email we now write which provider found it (hunter -> 'Hunter', pdl -> 'PDL', ...) into new custom prop email_enrichment_provider ('Email Enrichment Provider'). Only set on a Deepline work-email resolve (never for Forager). v3.48 (PHONE METADATA to HubSpot: alongside the phone number we now write the enrichment PROVIDER (winner key -> 'PDL'/'Upcell'/'Wiza'/... via deepline.provider_display), phone NAME MATCH (true/unknown/false from Trestle, NAMER-only), phone VALIDITY (Trestle phone.is_valid -> valid/invalid, NAMER-only), and finally POPULATE phone_country + phone_calling_code (previously blank) by parsing the resolved E.164 number with phonenumbers + pycountry (e.g. +919581999660 -> 'India','+91'). 3 new custom contact props auto-created: phone_enrichment_provider, phone_name_match, phone_validity (name_match/validity blank for non-NAMER where Trestle doesn't run). validate_phone now also captures phone.is_valid. New deps: phonenumbers, pycountry. v3.47 (FUNDING FIELDS REMAPPED to the client's 4 HubSpot fields: Funding (text) <- most recent funding DATE; Funding Amount (USD) <- most recent ROUND amount (last_funding_round_investment_usd); Total Funding <- TOTAL raised (crunchbase_total_investment_usd); Most Recent Funding Type <- most recent round type. get_company_funding now returns granular {total,last_amount,last_date,last_round_type}. The two Pipedrive-imported fields (Total Funding / Most Recent Funding Type) are resolved by LABEL via hubspot.company_property_name_by_label (overridable with FUNDING_TOTAL_FIELD / FUNDING_TYPE_FIELD). Tier-1 size check now uses TOTAL funding (unchanged intent). v3.46 (DUPLICATE-EMAIL 400 FIX: when the same person is discovered under two titles in one run, the second work-email write hits HubSpot's unique-email rule and HubSpot returns it as a 400 (not a 409) — our handler only caught 409, so the whole contact update aborted and NOTHING saved (Guillermo Rauch on the Vercel run: email was found, hunter=guillermo.rauch@vercel.com [valid], but the 400 wiped the save). hubspot._write_with_retry now also detects a duplicate-email 400 (_is_duplicate_email_error matches 'already exists'/'already has the value'/duplicate+email in the body) and retries WITHOUT `email`, same recovery as the existing 409 path, so the rest of the contact still lands. v3.45 (FUNDING NOW WORKS: switched company funding to Crustdata's company-DB screener crustdata_companydb_search (the Crustdata endpoint that actually carries funding) — reads crunchbase_total_investment_usd/last_funding_round_type/last_funding_date, picks the real company among same-domain namesakes by headcount, writes a clean summary (e.g. 'Total raised: $863M | Last round: Series F | 2025-09-30') + numeric amount for the Tier-1 rule. +/debug/funding?domain= probes a funding source (default Crustdata company-DB screener crustdata_companydb_search, which actually carries funding unlike the enrich tool) and returns raw JSON, to wire funding extraction. Reverted logo-step web-search cap back to 5 (speed handled via the faster ANTHROPIC_MODEL, e.g. claude-sonnet-4-6). Phone extractor now also covers camelCase/cell mobile keys (mobilePhone/mobileNumber/cell/cellphone/phonenumber) so we are prepared for Upcell-style output whose populated shape we have not directly observed. Email extraction now PREFERS the target-company email when a provider returns several — ContactOut returned [jsconf.eu, vercel.com] and we were grabbing jsconf (first) and rejecting it, throwing away the usable vercel.com address; now we pick the domain-matching one. +?raw=1 on the test endpoints surfaces each provider's full JSON, to verify extraction picks the RIGHT value (e.g. the target-domain email when a tool returns several). +/debug/email-tools + /debug/phone-tools: run EACH tool's real adapter through real extraction + validation, no first-success stop, no HubSpot write, ?tools= filter to test only specific tools. Upcell payload fixed to FLAT camelCase top-level fields (the `contact` nesting was wrong; live 422 confirmed it wants linkedinUrl/firstName/lastName/companyDomain/email flat). +/debug/phone-waterfall: runs the full region-aware phone waterfall + Trestle for a person without writing to HubSpot or skipping when a phone exists — lets us confirm the phone tools even when Forager always supplies a phone. Fixed the phone-provider adapters that returned nothing: Upcell now nests identity in a `contact` object (was flat -> empty); Wiza requests enrichment_level=full to actually return phones (DEEPLINE_WIZA_LEVEL); phone extractor now prefers INTERNATIONAL/E.164 format so a bare national number (Datagma's 1718659901) keeps its +country code (+491718659901); +Wiza phone_number1/mobile_phone1 keys. Findymail/Datagma confirmed working (needed the LinkedIn URL). + full per-provider logging + extractor hardening + domain guard + seeded 422 + Trestle/ZeroBounce verdict fixes. Tier 1/2; funding via Crustdata; region-aware phone waterfalls. Deepline dormant unless DEEPLINE_API_KEY)"
 
 _REQUIRED_ENV = ("FORAGER_API_KEY", "FORAGER_ACCOUNT_ID", "HUBSPOT_TOKEN")
 
@@ -95,6 +95,44 @@ def _int_arg(value, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# ---------------------------------------------------------------------------
+# IMPORT SAFEGUARD — stop a bulk HubSpot import from auto-triggering enrichment
+# (and silently burning Forager/Deepline credits). Every HubSpot creation event
+# carries a `changeSource`; a CSV/spreadsheet import stamps it "IMPORT". When
+# SKIP_IMPORT_WEBHOOKS is on (default), we ACK those events 200 but do NOT enqueue
+# them — so importing thousands of rows costs 0 credits. Real user-created records
+# (changeSource CRM_UI / FORM / API / INTEGRATION / ...) are unaffected and still
+# enrich normally. Pre-existing records are meant to be backfilled by the separate
+# bulk tool, not by the live webhook. Tunable: SKIP_IMPORT_WEBHOOKS (default true),
+# IMPORT_CHANGE_SOURCES (default "IMPORT"; add MIGRATION,BATCH_UPDATE,... to widen).
+# ---------------------------------------------------------------------------
+_SKIP_IMPORT_WEBHOOKS = _bool_env("SKIP_IMPORT_WEBHOOKS", True)
+_IMPORT_CHANGE_SOURCES = {
+    s.strip().upper()
+    for s in os.environ.get("IMPORT_CHANGE_SOURCES", "IMPORT").split(",")
+    if s.strip()
+}
+
+
+def _is_import_event(event: dict) -> bool:
+    """True if this webhook event was generated by a bulk import we should not enrich.
+
+    Keyed off HubSpot's `changeSource` (present on every creation/change event). A
+    missing changeSource is treated as NOT an import, so genuine records are never
+    silently dropped. No-op when SKIP_IMPORT_WEBHOOKS is disabled."""
+    if not _SKIP_IMPORT_WEBHOOKS:
+        return False
+    source = (event.get("changeSource") or "").strip().upper()
+    return bool(source) and source in _IMPORT_CHANGE_SOURCES
 
 
 @app.errorhandler(Exception)
@@ -256,10 +294,15 @@ def webhook():
     job_title_filter = request.args.get("job_title_filter")
     max_contacts = _int_arg(request.args.get("max_contacts"), 10)
     accepted = 0
+    skipped_import = 0
     for event in payload:
         object_id = str(event.get("objectId", ""))
         subscription = (event.get("subscriptionType") or "").lower()
         if not object_id:
+            continue
+        # Import safeguard: never enrich records created by a bulk import (0 credits).
+        if _is_import_event(event):
+            skipped_import += 1
             continue
         if subscription.startswith("company"):
             background.enqueue(_process_company_event, object_id, job_title_filter, max_contacts)
@@ -269,7 +312,11 @@ def webhook():
             accepted += 1
         else:
             logger.info("/webhook ignoring event with subscriptionType=%r", subscription)
-    return jsonify({"accepted": accepted, "queue_depth": background.queue_size()}), 200
+    if skipped_import:
+        logger.info("/webhook skipped %d import-sourced event(s) (changeSource in %s)",
+                    skipped_import, sorted(_IMPORT_CHANGE_SOURCES))
+    return jsonify({"accepted": accepted, "skipped_import": skipped_import,
+                    "queue_depth": background.queue_size()}), 200
 
 
 @app.route("/webhook/company", methods=["POST"])
@@ -280,13 +327,20 @@ def webhook_company():
     job_title_filter = request.args.get("job_title_filter")
     max_contacts = _int_arg(request.args.get("max_contacts"), 10)
     accepted = 0
+    skipped_import = 0
     for event in payload:
         company_id = str(event.get("objectId", ""))
         if not company_id:
             continue
+        if _is_import_event(event):  # import safeguard — 0 credits for bulk imports
+            skipped_import += 1
+            continue
         background.enqueue(_process_company_event, company_id, job_title_filter, max_contacts)
         accepted += 1
-    return jsonify({"accepted": accepted, "queue_depth": background.queue_size()}), 200
+    if skipped_import:
+        logger.info("/webhook/company skipped %d import-sourced event(s)", skipped_import)
+    return jsonify({"accepted": accepted, "skipped_import": skipped_import,
+                    "queue_depth": background.queue_size()}), 200
 
 
 @app.route("/webhook/contact", methods=["POST"])
@@ -295,13 +349,20 @@ def webhook_contact():
     payload = request.get_json(force=True, silent=True) or []
     logger.info("/webhook/contact received %d event(s)", len(payload))
     accepted = 0
+    skipped_import = 0
     for event in payload:
         contact_id = str(event.get("objectId", ""))
         if not contact_id:
             continue
+        if _is_import_event(event):  # import safeguard — 0 credits for bulk imports
+            skipped_import += 1
+            continue
         background.enqueue(_process_contact_event, contact_id)
         accepted += 1
-    return jsonify({"accepted": accepted, "queue_depth": background.queue_size()}), 200
+    if skipped_import:
+        logger.info("/webhook/contact skipped %d import-sourced event(s)", skipped_import)
+    return jsonify({"accepted": accepted, "skipped_import": skipped_import,
+                    "queue_depth": background.queue_size()}), 200
 
 
 # ---------------------------------------------------------------------------
