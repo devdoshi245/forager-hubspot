@@ -286,6 +286,12 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
         if phones:
             fields["phone"] = phones[0]
             fields["all_phones"] = ", ".join(phones)
+    # When Forager itself supplied the phone (Workflow 2), stamp the provider as "Forager"
+    # so HubSpot shows where the number came from. (Deepline's phone step is skipped when a
+    # phone already exists, so it would otherwise leave this blank.) Applies to both the
+    # manual-contact (role) and discovered-skeleton paths.
+    if phones:
+        fields["phone_enrichment_provider"] = "Forager"
     fields["forager_enriched"] = "true"
     if person_id and not (props.get("forager_person_id") or "").strip():
         fields["forager_person_id"] = person_id
@@ -674,6 +680,10 @@ def workflow3_deepline(hubspot_contact_id: str) -> dict:
             update["email_enrichment_provider"] = deepline.provider_display(winner)
         if (email_res.get("meta") or {}).get("smtp_provider"):
             update["email_smtp_provider"] = email_res["meta"]["smtp_provider"]
+    # Claude Name+Domain verdict (VALID for a written email, or the rejection reason when
+    # no email passed) -> "Email Verification" so reps see WHY an email is present/blank.
+    if email_res.get("email_verification"):
+        update["email_verification"] = email_res["email_verification"]
     if phone_res.get("value"):
         meta = phone_res.get("meta") or {}
         phone_val = phone_res["value"]

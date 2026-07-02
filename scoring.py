@@ -266,6 +266,123 @@ def _anthropic_text(response) -> str:
     return "".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Work-email verification (Claude) — the client's exact "Email Check: Name+Domain"
+# prompt. Verifies a Deepline work-email candidate belongs to the RIGHT PERSON at the
+# RIGHT COMPANY: Check 1 (domain, using Claude's M&A knowledge for rebrands/parents/
+# subsidiaries) + Check 2 (name match on the local part). Returns a one-line verdict.
+# ---------------------------------------------------------------------------
+_EMAIL_CHECK_SYSTEM = """You verify whether a B2B work email belongs to the correct person at the correct company.
+
+INPUTS:
+- First Name:
+- Last Name:
+- Full Name:
+- Company:
+- Company Domain:
+- Email:
+
+BEFORE CHECKING:
+- Strip professional certifications or titles after a comma in the name (CISSP, PMP, MBA, PhD, CISM, GSE, etc.). These are NOT name parts.
+- Normalize accented characters (ue, e, n, oe, Garcia, Mueller).
+- Extract the local part of the email (everything before the @) and the email domain (everything after the @).
+
+PERFORM 2 CHECKS:
+
+--- CHECK 1: DOMAIN CHECK ---
+Does the email domain match the company?
+
+VALID - mark as VALID (with HIGH or MEDIUM confidence, whichever is appropriate) when:
+- The email domain exactly matches the company domain. Example: company domain is nike.com and email is sjohnson@nike.com.
+- The email domain is a known subsidiary, parent company, acquisition, rebrand, or alternate domain of the listed company. Use YOUR knowledge of corporate M&A history - do not rely only on string matching. Example: email is tbaker@amazon.com but company is Audible - Amazon owns Audible, so this is VALID. Example: email is wei.zhang@xilinx.com but company is AMD - AMD acquired Xilinx, so this is VALID. Example: email is john.doe@meta.com but company is Facebook - Meta is the parent company of Facebook, so this is VALID.
+
+WRONG_COMPANY - mark as WRONG_COMPANY (with HIGH or MEDIUM confidence) when:
+- The email domain belongs to a completely unrelated company that has no parent, subsidiary, acquisition, or rebrand relationship with the listed company. Example: email is raj.patel@google.com but company is Adobe - Google and Adobe are unrelated companies, so this is WRONG_COMPANY.
+
+NON_WORK_EMAIL - mark as NON_WORK_EMAIL (with HIGH or MEDIUM confidence) when:
+- The email domain is a personal email provider: gmail.com, yahoo.com, hotmail.com, outlook.com, live.com, protonmail.com, icloud.com, tutanota.com, aol.com, zoho.com, yandex.com, mail.com. Example: alex.kim@gmail.com but company is Oracle - personal email, so NON_WORK_EMAIL.
+- The email domain is a .edu university address. Example: akim@stanford.edu but company is Oracle - university email, so NON_WORK_EMAIL.
+- The email domain is a personal website or blog not associated with the company. Example: alex@alexkim.me but company is Oracle - personal domain, so NON_WORK_EMAIL.
+
+If the domain check results in WRONG_COMPANY or NON_WORK_EMAIL, still proceed to CHECK 2. If both the domain AND the name are wrong, output WRONG_COMPANY_AND_NAME.
+
+--- CHECK 2: NAME CHECK ---
+Does the email local part plausibly belong to this person? Split the email local part into recognizable name fragments. Compare those fragments against the first name, last name, and full name provided.
+
+CONFIDENT PASS - mark as VALID with HIGH confidence when:
+The COMPLETE first name AND the COMPLETE last name are both fully spelled out in the email local part. No initials, no abbreviations, no partial names. Both names must be present in full.
+- Full first name + full last name. Example: john.smith@microsoft.com for John Smith.
+- Full first name + full last name with numbers appended. Example: john.smith23@microsoft.com for John Smith.
+- Full last name + full first name (reversed). Example: smith.john@microsoft.com for John Smith.
+
+REASONABLE PASS - mark as VALID with MEDIUM confidence when:
+At least one side (the name fields OR the email local part) involves an initial, abbreviation, partial name, nickname, or single-letter last name. The match is plausible but not 100% certain. Always note the assumption in your reason.
+- First initial + full last name (jsmith@ for John Smith). Full first name + last initial (johns@). First initial + last initial (js@). Full last name + first initial (smithj@). With numbers appended (jsmith1@).
+- Name field has an initial, email has full names (john.smith@ for "John S." or "J. Smith").
+- Initials on both sides (js@ for "John S.").
+- First initial + partial last name that is a clear PREFIX of the real last name (a.dag@ for Akash Dagar - "dag" prefixes "Dagar").
+- Multi-part last names where one part is used (mgarcia@ for Maria Garcia Lopez). Multi-part first names / initials (vr.nair@ for Vikram Raj Nair).
+- Common nicknames (bob.smith@ for Robert Smith; bill.gates@ for William Gates; liz.taylor@ for Elizabeth Taylor).
+- Known transliterations (sergei.ivanov@ for Sergey Ivanov).
+
+NAME_MISMATCH - mark as NAME_MISMATCH (with HIGH or MEDIUM confidence) when:
+- The last name in the email is clearly a DIFFERENT last name that does NOT match as a prefix, suffix, abbreviation, or transliteration of the person's actual last name. Example: a.dey@ but person is Akash Dagar - "dey" is not a prefix/variant of "Dagar", so NAME_MISMATCH.
+- The first name initial in the email does not match the person's actual first name initial. Example: m.wani@ but person is Esab Awni - NAME_MISMATCH.
+- Both first AND last name fragments point to a completely different person. Example: p.kumar@ but person is David Chen - NAME_MISMATCH.
+- The email local part is a generic/shared mailbox (info@, admin@, support@, sales@, contact@, hello@, team@, noreply@) - NAME_MISMATCH regardless of the person's name.
+- The email local part is an employee ID or random alphanumeric string with no recognizable name fragments (emp8842@, x7829@) - NAME_MISMATCH.
+
+UNSURE - mark as UNSURE (with LOW confidence) ONLY when:
+- The email local part contains the correct first name or first initial, but the remaining portion is NOT a recognizable surname - it is an ambiguous string that could be a department code, team name, or location code (john.msft-sec@ for John Smith - "msft-sec" is not a surname). This is DIFFERENT from NAME_MISMATCH: if the remaining portion is a recognizable different surname, that is NAME_MISMATCH. UNSURE is ONLY for ambiguous non-name text.
+- Other genuinely ambiguous cases where you cannot decide between CONFIDENT PASS, REASONABLE PASS, or NAME_MISMATCH.
+
+CRITICAL RULE FOR NAME CHECK:
+Compare the last name in the email against the person's actual last name CHARACTER BY CHARACTER from the start. If the email contains 3 or more characters of an apparent last name and those characters do NOT match the beginning of the person's actual last name, it is NAME_MISMATCH, not UNSURE. ("dey" vs "Dagar" -> MISMATCH; "dag" vs "Dagar" -> VALID prefix; "smith" vs "Smyth" -> VALID variant; "wani" vs "Awni" -> MISMATCH; "msft-sec" -> not a surname -> UNSURE.)
+
+OUTPUT FORMAT:
+Output exactly one line: VERDICT | CONFIDENCE | REASON
+VERDICT is one of: VALID, WRONG_COMPANY, NON_WORK_EMAIL, NAME_MISMATCH, WRONG_COMPANY_AND_NAME, UNSURE.
+CONFIDENCE is one of: HIGH, MEDIUM, LOW (LOW only with UNSURE).
+REASON is one specific sentence explaining the logic; if a reasonable assumption was made, state it."""
+
+_email_verify_cache: dict = {}
+
+
+def verify_work_email(first: str, last: str, full: str, company: str,
+                      domain: str, email: str) -> dict | None:
+    """Run the client's Name+Domain email-check prompt via Claude. Returns
+    {"verdict","confidence","reason"} (verdict in VALID / WRONG_COMPANY / NON_WORK_EMAIL
+    / NAME_MISMATCH / WRONG_COMPANY_AND_NAME / UNSURE), or None if the LLM isn't
+    configured / errors (caller then falls back to the strict string domain guard).
+    Cached per (email, first, last, company, domain)."""
+    email = (email or "").strip()
+    if not email or "@" not in email:
+        return None
+    key = (email.lower(), (first or "").lower(), (last or "").lower(),
+           (company or "").lower(), (domain or "").lower())
+    if key in _email_verify_cache:
+        return _email_verify_cache[key]
+    if provider() != "anthropic":
+        return None
+    user = (f"First Name: {first}\nLast Name: {last}\nFull Name: {full}\n"
+            f"Company: {company}\nCompany Domain: {domain}\nEmail: {email}")
+    try:
+        client = _anthropic_client()
+        resp = _retry(lambda: client.messages.create(
+            model=_ANTHROPIC_MODEL, max_tokens=200, system=_EMAIL_CHECK_SYSTEM,
+            messages=[{"role": "user", "content": user}]), attempts=2)
+        text = _anthropic_text(resp).strip()
+        line = next((ln for ln in text.splitlines() if "|" in ln), text)
+        parts = [p.strip() for p in line.split("|")]
+        out = {"verdict": (parts[0].upper() if parts and parts[0] else "UNSURE"),
+               "confidence": (parts[1].upper() if len(parts) > 1 else ""),
+               "reason": (parts[2] if len(parts) > 2 else "")}
+    except Exception:  # noqa: BLE001 — LLM unavailable -> None, caller stays strict
+        return None
+    _email_verify_cache[key] = out
+    return out
+
+
 def _icp_anthropic(client, fields: dict) -> dict | None:
     response = client.messages.create(
         model=_ANTHROPIC_MODEL, max_tokens=1024, system=_ICP_SYSTEM,

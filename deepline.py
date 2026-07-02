@@ -783,10 +783,9 @@ def _run_waterfall(order: list, adapters: dict, inp: dict, validate, normalize, 
 
 
 def _email_domain_ok(email: str, domain: str) -> bool:
-    """True if `email` belongs to the target company `domain` (exact, or a sub/parent
-    domain). Guards against enrich-person tools returning the person's email at a
-    DIFFERENT current employer (e.g. a board seat). Set DEEPLINE_EMAIL_DOMAIN_MATCH=off
-    to disable (e.g. for companies whose email domain differs from their website)."""
+    """Strict string domain guard (exact / sub / parent domain). Used as the FALLBACK for
+    the email waterfall when the Claude verification (verify_work_email) isn't available.
+    Set DEEPLINE_EMAIL_DOMAIN_MATCH=off to disable."""
     if (os.environ.get("DEEPLINE_EMAIL_DOMAIN_MATCH") or "on").strip().lower() in ("off", "0", "false", "no"):
         return True
     if not domain or "@" not in (email or ""):
@@ -794,14 +793,70 @@ def _email_domain_ok(email: str, domain: str) -> bool:
     return _same_company(email, domain)
 
 
+# Rank a rejection verdict so we can surface the MOST informative one when no email passes
+# (so HubSpot shows *why* the email field is blank — a mismatch beats a vague 'unsure').
+_VERDICT_SEVERITY = {"WRONG_COMPANY_AND_NAME": 5, "NAME_MISMATCH": 4, "WRONG_COMPANY": 3,
+                     "NON_WORK_EMAIL": 2, "UNSURE": 1, "VALID": 0}
+
+
+def _fmt_verdict(v: dict) -> str:
+    """{verdict,confidence,reason} -> 'VERDICT | CONFIDENCE | reason' for the HubSpot field."""
+    return " | ".join(p for p in (v.get("verdict"), v.get("confidence"), v.get("reason")) if p)
+
+
 def run_email_waterfall(inp: dict) -> dict:
     if not is_enabled() or not inp.get("domain") or not (inp.get("first_name") or inp.get("full_name")):
         return {}
     domain = inp.get("domain")
-    return _run_waterfall(_order("DEEPLINE_EMAIL_ORDER", _DEFAULT_EMAIL_ORDER),
-                          _EMAIL_ADAPTERS, inp, validate_email,
-                          lambda e: e.lower().strip(), "email",
-                          accept=lambda e: _email_domain_ok(e, domain))
+    first = inp.get("first_name") or ""
+    last = inp.get("last_name") or ""
+    full = inp.get("full_name") or f"{first} {last}".strip()
+    company = inp.get("company_name") or ""
+    verdicts: dict = {}   # email -> {verdict,confidence,reason} from Claude (only run on domain-mismatch)
+    matched: set = set()  # emails that passed the fast string domain check (no Claude needed)
+
+    def accept(email: str) -> bool:
+        # 1) FAST string domain check. If the email domain matches the company domain
+        #    (exact / sub / parent), accept immediately — no Claude call. ZeroBounce still
+        #    validates deliverability afterwards.
+        if _email_domain_ok(email, domain):
+            matched.add(email.lower().strip())
+            return True
+        # 2) Domain does NOT match -> escalate to the Claude Name+Domain check. This is the
+        #    only path that spends a Claude call. It rescues M&A rebrands/parents/subsidiaries
+        #    (e.g. @meta.com for Facebook) and rejects wrong-company/wrong-person/personal.
+        #    Accept ONLY a VALID verdict; UNSURE and everything else -> reject.
+        v = None
+        try:
+            import scoring  # lazy import (avoids circular import)
+            v = scoring.verify_work_email(first, last, full, company, domain, email)
+        except Exception:  # noqa: BLE001
+            v = None
+        if v is None:
+            # Claude unavailable and the string domain check already failed -> reject (strict).
+            return False
+        verdicts[email.lower().strip()] = v
+        ok = v.get("verdict") == "VALID"
+        if not ok:
+            logger.info("Deepline email: %s REJECTED by name+domain check (%s)", email, _fmt_verdict(v))
+        return ok
+
+    res = _run_waterfall(_order("DEEPLINE_EMAIL_ORDER", _DEFAULT_EMAIL_ORDER),
+                         _EMAIL_ADAPTERS, inp, validate_email,
+                         lambda e: e.lower().strip(), "email", accept=accept)
+    if res:
+        ekey = (res.get("value") or "").lower().strip()
+        if ekey in verdicts:
+            res["email_verification"] = _fmt_verdict(verdicts[ekey])       # Claude-verified (domain mismatch)
+        elif ekey in matched:
+            res["email_verification"] = "VALID | HIGH | email domain matches company domain"
+        return res
+    # Nothing resolved — surface the most informative Claude rejection (only domain-mismatch
+    # candidates ever reached Claude) so HubSpot shows WHY the email is blank.
+    if verdicts:
+        worst = max(verdicts.values(), key=lambda x: _VERDICT_SEVERITY.get((x.get("verdict") or "").upper(), 0))
+        return {"email_verification": _fmt_verdict(worst)}
+    return {}
 
 
 def run_phone_waterfall(inp: dict) -> dict:
