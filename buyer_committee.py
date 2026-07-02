@@ -20,6 +20,7 @@ Matching is normalization-tolerant:
     matches the bare "President".
 """
 
+import os
 import re
 
 # ---------------------------------------------------------------------------
@@ -276,3 +277,108 @@ def matches_buyer_committee_exact(title: str | None) -> bool:
                 return True
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# SIZE-BASED DISCOVERY STRATEGY (per Shirish/Ahmed's "finding people" logic).
+#
+# The email anchors two rules and leaves the middle to sensible defaults:
+#   * How MANY people to target scales with headcount. Shirish gave the count
+#     options 3 / 5 / 7 / 10; we map them to headcount bands (all env-tunable).
+#   * WHICH titles to target depends on company size:
+#       - Small companies (~10-50) are CXO-led — the founder/CPO/CTO/COO IS the
+#         buyer, so we lead with the C-suite.
+#       - Large companies — the C-suite is unreachable, so we SKIP it and target
+#         the VP / Head / Director layer (and the rest of the committee).
+#       - Mid companies keep the full committee in its natural priority order.
+#   * Category priority (Decision Maker -> Champion -> Influencer) and "max 1
+#     contact per title" are enforced by the caller (discover_and_create_contacts).
+#
+# Every threshold/count is overridable via env so the client can retune without
+# a code change. Unknown headcount falls back to the mid-size defaults.
+# ---------------------------------------------------------------------------
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "").strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
+# Headcount band edges (inclusive upper bounds).
+_SMALL_MAX = _env_int("DISCOVERY_SMALL_MAX", 50)      # <= this => small (CXO-led)
+_MID_MAX = _env_int("DISCOVERY_MID_MAX", 200)         # <= this => mid
+_LARGE_MAX = _env_int("DISCOVERY_LARGE_MAX", 1000)    # <= this => large; above => x-large
+
+# How many contacts to target per band (Shirish's 3 / 5 / 7 / 10).
+_COUNT_SMALL = _env_int("DISCOVERY_COUNT_SMALL", 3)
+_COUNT_MID = _env_int("DISCOVERY_COUNT_MID", 5)
+_COUNT_LARGE = _env_int("DISCOVERY_COUNT_LARGE", 7)
+_COUNT_XLARGE = _env_int("DISCOVERY_COUNT_XLARGE", 10)
+_COUNT_DEFAULT = _env_int("DISCOVERY_COUNT_DEFAULT", _COUNT_MID)  # unknown headcount
+
+# C-suite titles skipped for large companies (unreachable there) and boosted to
+# the front for small companies (they ARE the buyer). Matched by exact string
+# against the _TITLES entries.
+_CSUITE_TITLES = frozenset({
+    "Chief Product Officer", "CPO",
+    "Chief Technology Officer", "CTO",
+    "Chief Executive Officer", "CEO",
+    "Founder", "Co-Founder",
+    "President",
+    "Chief Operating Officer", "COO",
+    "Chief Data Officer", "CDO",
+    "Chief Legal Officer",
+})
+
+
+def _emp_to_int(employees) -> int | None:
+    """Coerce a HubSpot employee-count value (str/float/int/None) to an int, or None."""
+    if employees is None:
+        return None
+    try:
+        return int(float(str(employees).replace(",", "").strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def is_csuite_title(title: str | None) -> bool:
+    """True if `title` is exactly a C-suite / founder title (env: _CSUITE_TITLES)."""
+    return (title or "").strip() in _CSUITE_TITLES
+
+
+def target_contact_count(employees) -> int:
+    """How many buyer-committee contacts to discover for a company of this size.
+
+    Bands (env-tunable): <=50 -> 3, <=200 -> 5, <=1000 -> 7, >1000 -> 10.
+    Unknown headcount falls back to the mid-size default (5)."""
+    n = _emp_to_int(employees)
+    if n is None:
+        return _COUNT_DEFAULT
+    if n <= _SMALL_MAX:
+        return _COUNT_SMALL
+    if n <= _MID_MAX:
+        return _COUNT_MID
+    if n <= _LARGE_MAX:
+        return _COUNT_LARGE
+    return _COUNT_XLARGE
+
+
+def titles_for_company(employees) -> list[str]:
+    """The buyer-committee titles to search, ORDERED by priority for this company size.
+
+    * Small (<=50): C-suite first (the founder/CPO/CTO is the buyer), then the rest.
+    * Large (>1000): C-suite dropped (unreachable) — lead with VP/Head/Director.
+    * Mid / unknown: the full committee in its natural declared priority order.
+
+    Category priority (Decision Maker -> Champion -> Influencer) is already baked into
+    the declared order of committee_titles(); this only reshuffles the C-suite layer."""
+    titles = committee_titles()
+    n = _emp_to_int(employees)
+    if n is not None and n <= _SMALL_MAX:
+        execs = [t for t in titles if is_csuite_title(t)]
+        rest = [t for t in titles if not is_csuite_title(t)]
+        return execs + rest
+    if n is not None and n > _LARGE_MAX:
+        return [t for t in titles if not is_csuite_title(t)]
+    return titles

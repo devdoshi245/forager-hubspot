@@ -368,6 +368,7 @@ def discover_and_create_contacts(
     forager_org_id: str | None = None,
     job_title_filter: str | None = None,
     max_contacts: int = 10,
+    employees=None,
 ) -> list[dict]:
     """Workflow 1's contact step — DISCOVER buyer-committee people at a company by their
     EXACT title and create them as skeleton contacts. Each skeleton fires Workflow 2
@@ -424,7 +425,10 @@ def discover_and_create_contacts(
         )
 
     # --- Title-bucketed, parent-org-isolated discovery ---
-    titles = buyer_committee.committee_titles()
+    # Size-based title strategy: small cos are CXO-led, large cos skip the
+    # (unreachable) C-suite and target the VP/Head/Director layer. Category
+    # priority (Decision Maker -> Champion -> Influencer) stays intact.
+    titles = buyer_committee.titles_for_company(employees)
     if job_title_filter:
         titles = [t for t in titles if job_title_filter.lower() in t.lower()]
 
@@ -449,7 +453,8 @@ def discover_and_create_contacts(
             continue
         titles_with_people += 1
         page = 0
-        while needed > 0 and page < _MAX_PAGES_PER_TITLE:
+        created_for_title = False  # max 1 contact per title (Shirish's rule)
+        while needed > 0 and not created_for_title and page < _MAX_PAGES_PER_TITLE:
             roles, _total = forager.find_contacts_by_role_title(forager_org_id, title, page=page)
             search_credits += 1  # person_role_search = 1 credit/page (totals checks are free)
             page += 1
@@ -466,11 +471,15 @@ def discover_and_create_contacts(
                     continue
                 res = _create_skeleton_from_role(role, hubspot_company_id, owner_id, seen_person_ids)
                 if res is None:
+                    # Already-seen / duplicate person — keep scanning THIS title for a
+                    # different, not-yet-created person before moving on.
                     continue
                 res["matched_title"] = title
                 results.append(res)
                 matches_found += 1
                 needed -= 1
+                created_for_title = True  # take at most one person per title
+                break
 
     if needed > 0:
         stop_reason = "exhausted buyer-committee titles with matches (fewer than cap available)"
@@ -592,6 +601,11 @@ def handle_company_webhook(hubspot_company_id: str, job_title_filter: str | None
     # The parent org id resolved during enrichment is what isolates the MAIN company
     # from its same-domain subsidiaries in title-bucketed discovery.
     forager_org_id = company_result.get("forager_org_id") or None
+    # Size-based target count (Shirish's 3/5/7/10 by headcount). max_contacts stays a
+    # hard upper safety cap: the effective target never exceeds the caller's cap, so an
+    # explicit lower cap (e.g. testing) still wins while defaults get the size-based count.
+    employees = company_result.get("employees")
+    effective_max = min(max_contacts, buyer_committee.target_contact_count(employees))
     discovered_contacts = []
     if company_domain or forager_org_id:
         discovered_contacts = discover_and_create_contacts(
@@ -599,7 +613,8 @@ def handle_company_webhook(hubspot_company_id: str, job_title_filter: str | None
             company_domain=company_domain,
             forager_org_id=forager_org_id,
             job_title_filter=job_title_filter,
-            max_contacts=max_contacts,
+            max_contacts=effective_max,
+            employees=employees,
         )
 
     return {
