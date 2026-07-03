@@ -676,14 +676,35 @@ def workflow3_deepline(hubspot_contact_id: str) -> dict:
     has_work_email = bool((props.get("email") or "").strip())
     has_phone = bool((props.get("phone") or "").strip())
 
-    # Run the (needed) waterfalls in parallel (each is independent and I/O-bound).
-    import concurrent.futures as _f
     email_res, phone_res = {}, {}
-    with _f.ThreadPoolExecutor(max_workers=2) as pool:
-        email_future = pool.submit(deepline.run_email_waterfall, inp) if not has_work_email else None
-        phone_future = pool.submit(deepline.run_phone_waterfall, inp) if not has_phone else None
-        email_res = (email_future.result() or {}) if email_future else {}
-        phone_res = (phone_future.result() or {}) if phone_future else {}
+    if deepline.sequential_reuse_enabled():
+        # SEQUENTIAL + REUSE (credit optimisation, per Shirish's call): run the email
+        # waterfall first, THEN the phone waterfall, sharing a per-contact tool-response
+        # cache. A tool called in both with the SAME payload (e.g. PDL, whose one
+        # flat-priced enrich carries email AND phone) is charged ONCE — the phone
+        # waterfall reuses the cached response when its region-ordered sequence reaches
+        # that tool. Field-gated tools (ContactOut/Prospeo/Lusha) send different
+        # payloads per waterfall, so they still make their own calls (no eager phone
+        # reveal). Waterfall ORDER and validation are unchanged.
+        deepline.begin_reuse_cache()
+        try:
+            if not has_work_email:
+                email_res = deepline.run_email_waterfall(inp) or {}
+            if not has_phone:
+                phone_res = deepline.run_phone_waterfall(inp) or {}
+        finally:
+            saved = deepline.end_reuse_cache()
+            if saved:
+                logger.info("Deepline reuse cache saved %d duplicate tool call(s) for contact %s",
+                            saved, hubspot_contact_id)
+    else:
+        # Default: run the (needed) waterfalls in parallel (each is independent, I/O-bound).
+        import concurrent.futures as _f
+        with _f.ThreadPoolExecutor(max_workers=2) as pool:
+            email_future = pool.submit(deepline.run_email_waterfall, inp) if not has_work_email else None
+            phone_future = pool.submit(deepline.run_phone_waterfall, inp) if not has_phone else None
+            email_res = (email_future.result() or {}) if email_future else {}
+            phone_res = (phone_future.result() or {}) if phone_future else {}
 
     update: dict = {"deepline_enriched": "true"}
     if email_res.get("value"):

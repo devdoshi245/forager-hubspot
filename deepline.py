@@ -31,6 +31,7 @@ any error a function returns an empty result and logs, so Workflow 3 can never
 break Workflow 2 or a webhook.
 """
 
+import json
 import logging
 import os
 import re
@@ -46,6 +47,47 @@ _SESSION = httpclient.make_session()
 # Thread-local capture of raw execute_tool responses — used ONLY by the debug test
 # harness (?raw=1) to surface each provider's full JSON. Off by default (no overhead).
 _capture = threading.local()
+
+# ---------------------------------------------------------------------------
+# Per-contact TOOL-RESPONSE REUSE CACHE (credit optimisation).
+# When a contact is enriched SEQUENTIALLY (email waterfall, then phone — see
+# workflow3_deepline), a tool called in BOTH waterfalls with the SAME payload is
+# a wasted second charge. The classic case is PDL: `peopledatalabs_enrich_contact`
+# is called with identity-only in both waterfalls and one flat-priced response
+# already carries the work email AND the phone. This cache stores each
+# execute_tool response keyed by (tool_id, exact payload); a second identical call
+# is served from memory — no HTTP, no credit.
+#
+# Field-gated tools are UNAFFECTED by design: ContactOut (include=[work_email] vs
+# [phone]), Prospeo (enrich_mobile flag), and Lusha (reveal_phones flag) send a
+# DIFFERENT payload in each waterfall, so their keys differ and they still make
+# their own calls — we never eagerly pay to reveal a phone we might not need.
+#
+# Correctness guards: the cache is (a) per-contact (reset each run), (b) keyed by
+# the exact payload, and (c) BYPASSED for async poll reads (_poll passes
+# cacheable=False) so a "still running" job is never frozen. Thread-local, so
+# concurrent contacts on the background worker never share a cache.
+_reuse = threading.local()
+
+
+def begin_reuse_cache() -> None:
+    """Start a fresh per-contact tool-response cache on this thread (idempotent)."""
+    _reuse.cache = {}
+    _reuse.hits = 0
+
+
+def end_reuse_cache() -> int:
+    """Tear down the cache; returns how many calls it saved (for logging)."""
+    saved = getattr(_reuse, "hits", 0)
+    _reuse.cache = None
+    _reuse.hits = 0
+    return saved
+
+
+def sequential_reuse_enabled() -> bool:
+    """Master switch (default OFF): run the two waterfalls sequentially with the
+    reuse cache. Off => unchanged parallel behaviour."""
+    return (os.environ.get("DEEPLINE_SEQUENTIAL_REUSE") or "").strip().lower() in ("1", "true", "yes", "on")
 
 DEEPLINE_BASE = "https://code.deepline.com/api/v2"
 DEEPLINE_API_KEY = os.environ.get("DEEPLINE_API_KEY")
@@ -208,15 +250,42 @@ def _parse_unexpected_fields(text: str) -> set:
     return fields
 
 
-def execute_tool(tool_id: str, payload: dict, timeout: int = 60) -> dict | None:
+def execute_tool(tool_id: str, payload: dict, timeout: int = 60,
+                 cacheable: bool = True) -> dict | None:
     """Execute one Deepline tool. Returns the parsed JSON body (dict) or None on any
     error. Never raises — a failed provider must not break the pipeline.
 
     On a 422 "unexpected field" validation error, the offending fields are stripped
     and the call is retried (and cached per tool), so strict-schema tools succeed
-    without us hardcoding each tool's payload shape."""
+    without us hardcoding each tool's payload shape.
+
+    When a per-contact reuse cache is active (sequential enrichment), an identical
+    (tool_id, payload) call is served from that cache — no HTTP, no credit. Async
+    poll reads pass cacheable=False so a "still running" job is never frozen."""
     if not is_enabled():
         return None
+
+    cache = getattr(_reuse, "cache", None) if cacheable else None
+    ckey = None
+    if cache is not None:
+        try:
+            ckey = (tool_id, json.dumps(payload, sort_keys=True, default=str))
+        except Exception:  # noqa: BLE001 — unserialisable payload -> just don't cache
+            ckey = None
+        if ckey is not None and ckey in cache:
+            _reuse.hits = getattr(_reuse, "hits", 0) + 1
+            logger.info("Deepline %s: served from per-contact reuse cache (0 credits)", tool_id)
+            return cache[ckey]
+
+    result = _execute_tool_call(tool_id, payload, timeout)
+
+    if cache is not None and ckey is not None:
+        cache[ckey] = result
+    return result
+
+
+def _execute_tool_call(tool_id: str, payload: dict, timeout: int = 60) -> dict | None:
+    """The actual HTTP call + 422 self-heal (no caching — see execute_tool)."""
     url = f"{DEEPLINE_BASE}/integrations/{tool_id}/execute"
     # Pre-strip fields this tool already rejected earlier in the process.
     known_bad = _REJECTED_FIELDS.get(tool_id)
@@ -260,7 +329,7 @@ def execute_tool(tool_id: str, payload: dict, timeout: int = 60) -> dict | None:
 def _poll(tool_id: str, payload: dict, tries: int = 12, delay: float = 2.0) -> dict | None:
     """Poll an async tool's read endpoint until it returns a terminal result."""
     for _ in range(tries):
-        data = execute_tool(tool_id, payload)
+        data = execute_tool(tool_id, payload, cacheable=False)  # each poll must be a FRESH read
         if data is None:
             return None
         status = str(_first(data, ("status", "state")) or "").upper()
