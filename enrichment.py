@@ -337,6 +337,10 @@ def _create_skeleton_from_role(role: dict, hubspot_company_id: str, owner_id,
     fields = forager.parse_person_fields(role, [], [], [])  # skeleton only — no email/phone
     if owner_id:
         fields["hubspot_owner_id"] = owner_id
+    # Tag it as automation-created so it's distinguishable from a manually-added
+    # contact (which leaves Contact Source blank). Applied only to NEW creations
+    # below — an already-existing contact we merely link is never re-tagged.
+    fields["contact_source"] = "TAM Automation"
 
     # Cross-company dedup (free HubSpot search): if this person already exists as a
     # contact, just associate them — don't create a duplicate or re-trigger a reveal.
@@ -409,8 +413,10 @@ def discover_and_create_contacts(
         return [{"status": "skipped",
                  "reason": f"company already has {already} contact(s); max is {max_contacts}"}]
 
-    # Auto-created contacts go to the configured Contact Owner so they don't land unassigned.
-    owner_id = hubspot.auto_create_owner_id()
+    # Contact Owner = Company Owner: auto-created contacts inherit the company's owner
+    # exactly — including "no owner" (None -> the contact is left unassigned, matching
+    # the company). This is a one-time copy at creation, not an ongoing sync.
+    owner_id = hubspot.get_company_owner_id(hubspot_company_id)
 
     # Resolve the PARENT org id (the only thing that excludes same-domain subsidiaries).
     if not forager_org_id and company_domain:

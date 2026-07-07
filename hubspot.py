@@ -78,6 +78,10 @@ _CONTACT_CUSTOM_PROPS = [
     ("forager_enriched", "Forager Enriched"),
     ("all_emails", "All Emails"),
     ("all_phones", "All Phones"),
+    # Stamped "TAM Automation" ONLY on contacts our discovery creates, so an
+    # automation-dumped contact is distinguishable from a manually-added one
+    # (which leaves this blank). See enrichment._create_skeleton_from_role.
+    ("contact_source", "Contact Source"),
 ]
 # Deepline / Workflow 3 contact properties. Created ONLY when DEEPLINE_API_KEY is set
 # (see ensure_custom_properties), so an account with Deepline off gets zero new fields.
@@ -353,6 +357,20 @@ def find_enriched_duplicate_company(domain: str, exclude_id: str) -> dict | None
         if ((c.get("properties") or {}).get("forager_org_id") or "").strip():
             return c
     return None
+
+
+def get_company_owner_id(company_id: str) -> str | None:
+    """Return the company's owner id (`hubspot_owner_id`), or None if it has NO owner.
+    Auto-created contacts inherit exactly this — including 'no owner' (None) — so the
+    contact owner always matches the company owner."""
+    resp = _SESSION.get(
+        f"{HUBSPOT_BASE}/crm/v3/objects/companies/{company_id}",
+        headers=_headers(), params={"properties": "hubspot_owner_id"}, timeout=30,
+    )
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    return ((resp.json().get("properties") or {}).get("hubspot_owner_id") or "").strip() or None
 
 
 def update_company(company_id: str, properties: dict) -> dict:
