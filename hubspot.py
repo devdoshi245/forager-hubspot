@@ -327,6 +327,34 @@ def find_company_by_domain(domain: str) -> dict | None:
     return results[0] if results else None
 
 
+def find_enriched_duplicate_company(domain: str, exclude_id: str) -> dict | None:
+    """Return ANOTHER company (different id) that shares this domain AND is already
+    enriched (has forager_org_id), or None. Free HubSpot search — spends no credits.
+
+    This is the domain-dedup guard: when an external sync (e.g. Airtable) creates a
+    DUPLICATE company record for a company we've already enriched under a different
+    record, that duplicate looks 'new' (blank forager_org_id, no contacts) and would
+    otherwise be fully re-enriched + re-discovered, wasting credits. This lets the
+    caller skip it."""
+    if not domain:
+        return None
+    body = {
+        "filterGroups": [{"filters": [{"propertyName": "domain", "operator": "EQ", "value": domain}]}],
+        "properties": ["name", "domain", "forager_org_id"],
+        "limit": 10,
+    }
+    resp = _SESSION.post(
+        f"{HUBSPOT_BASE}/crm/v3/objects/companies/search", json=body, headers=_headers(), timeout=30,
+    )
+    resp.raise_for_status()
+    for c in resp.json().get("results", []):
+        if str(c.get("id")) == str(exclude_id):
+            continue
+        if ((c.get("properties") or {}).get("forager_org_id") or "").strip():
+            return c
+    return None
+
+
 def update_company(company_id: str, properties: dict) -> dict:
     return _write_with_retry("patch", f"{HUBSPOT_BASE}/crm/v3/objects/companies/{company_id}", properties)
 

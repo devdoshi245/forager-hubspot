@@ -587,12 +587,40 @@ def _discover_by_domain_pagination(
     return results
 
 
+def _dedup_guard_enabled() -> bool:
+    """Domain-dedup guard on by default; disable with COMPANY_DEDUP_GUARD=off."""
+    return (os.environ.get("COMPANY_DEDUP_GUARD") or "on").strip().lower() not in ("off", "0", "false", "no")
+
+
 def handle_company_webhook(hubspot_company_id: str, job_title_filter: str | None = None,
                            max_contacts: int = 10, force: bool = False) -> dict:
     """Workflow 1 (company-created): enrich the company, then DISCOVER buyer-committee
     contacts as skeletons. It does NOT enrich them here — creating each skeleton fires
     the contact-created webhook, which runs Workflow 2 to reveal email/phone. This is
     the chain reaction: company workflow -> discovered contacts -> contact workflow."""
+    # DOMAIN-DEDUP GUARD: if a DIFFERENT company with the SAME domain is already enriched,
+    # this record is a duplicate (e.g. an external Airtable/CRM sync created a second copy
+    # of a company we already have). A duplicate looks 'new' — blank forager_org_id, no
+    # contacts — so without this it would be fully re-enriched + re-discovered, wasting
+    # ~25 credits per contact. Skip it entirely BEFORE spending anything. Free HubSpot
+    # search (0 credits). Manual force=True refreshes bypass the guard on purpose.
+    if not force and _dedup_guard_enabled():
+        company = hubspot.get_company(hubspot_company_id)
+        domain = ((company or {}).get("properties", {}).get("domain") or "").strip()
+        if domain:
+            dup = hubspot.find_enriched_duplicate_company(domain, exclude_id=hubspot_company_id)
+            if dup:
+                logger.info(
+                    "Dedup guard: company %s (domain=%s) is a DUPLICATE of already-enriched "
+                    "company %s — skipping enrichment + discovery (0 credits)",
+                    hubspot_company_id, domain, dup.get("id"),
+                )
+                return {"hubspot_company_id": hubspot_company_id, "status": "skipped",
+                        "reason": f"duplicate of already-enriched company {dup.get('id')} "
+                                  f"(domain {domain}); skipped to avoid re-enriching",
+                        "domain": domain,
+                        "duplicate_of": dup.get("id")}
+
     company_result = enrich_company(hubspot_company_id, force=force)
     if "error" in company_result:
         return company_result
