@@ -319,8 +319,31 @@ def enrich_contact(hubspot_contact_id: str) -> dict:
 _MAX_PAGES_PER_TITLE = 50
 
 
+def _match_existing_contact(fields: dict, existing_index: dict | None) -> str | None:
+    """Match a to-be-created skeleton against the company's existing contacts by
+    IDENTITY (LinkedIn slug, then email) — catches manually-added contacts that carry
+    no forager_person_id. Exact identifiers only; deliberately NO name matching (two
+    different people can share a name). Returns the existing contact id or None."""
+    if not existing_index:
+        return None
+    slug = _linkedin_slug(fields.get("hs_linkedin_url") or "")
+    if slug:
+        match = existing_index.get(f"li:{slug.lower()}")
+        if match:
+            return match
+    for email_field in ("email", "migrated_emails_home", "all_emails"):
+        for addr in (fields.get(email_field) or "").split(","):
+            addr = addr.strip().lower()
+            if addr and "@" in addr:
+                match = existing_index.get(f"em:{addr}")
+                if match:
+                    return match
+    return None
+
+
 def _create_skeleton_from_role(role: dict, hubspot_company_id: str, owner_id,
-                               seen_person_ids: set) -> dict | None:
+                               seen_person_ids: set,
+                               existing_index: dict | None = None) -> dict | None:
     """Create (or link) a HubSpot skeleton contact from a Forager role record and
     associate it to the company. Spends NO reveal credits — creating the skeleton fires
     the contact-created webhook, which runs Workflow 2 to reveal email/phone. Returns a
@@ -349,9 +372,22 @@ def _create_skeleton_from_role(role: dict, hubspot_company_id: str, owner_id,
         contact_id = existing["id"]
         action = "exists"
     else:
-        created = hubspot.create_contact(fields)
-        contact_id = created["id"]
-        action = "discovered"
+        # Identity dedup against the company's OWN contacts: a manually-added contact
+        # (no forager_person_id) is matched by LinkedIn slug or email. Link + stamp it
+        # instead of creating a duplicate; Workflow 2 then enriches the existing record.
+        matched_id = _match_existing_contact(fields, existing_index)
+        if matched_id:
+            contact_id = matched_id
+            action = "linked_existing"
+            if pid:  # stamp the id so every future run recognises this person instantly
+                try:
+                    hubspot.update_contact(contact_id, {"forager_person_id": pid})
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Could not stamp person id on contact %s: %s", contact_id, exc)
+        else:
+            created = hubspot.create_contact(fields)
+            contact_id = created["id"]
+            action = "discovered"
 
     try:
         hubspot.associate_contact_to_company(contact_id, hubspot_company_id)
@@ -397,8 +433,12 @@ def discover_and_create_contacts(
     hubspot.ensure_custom_properties()
 
     # What does the company already have? Count stamped contacts (skeleton or enriched)
-    # and remember their Forager person ids so we don't re-create them.
+    # and remember their Forager person ids so we don't re-create them. Also index the
+    # company's contacts by LinkedIn slug and email: a manually-added contact carries
+    # no forager_person_id, so identity matching is the only way to recognise that a
+    # discovered person is already in the CRM (link + enrich instead of duplicating).
     seen_person_ids: set = set()
+    existing_index: dict = {}   # "li:<slug>" / "em:<email>" -> contact id
     already = 0
     for existing_contact in hubspot.get_contacts_for_company(hubspot_company_id):
         cp = existing_contact.get("properties", {})
@@ -406,6 +446,17 @@ def discover_and_create_contacts(
         if pid:
             seen_person_ids.add(pid)
             already += 1
+        contact_id = str(existing_contact.get("id") or "")
+        if not contact_id:
+            continue
+        slug = _contact_linkedin_slug(cp)
+        if slug:
+            existing_index.setdefault(f"li:{slug.lower()}", contact_id)
+        for email_field in ("email", "migrated_emails_home", "all_emails"):
+            for addr in (cp.get(email_field) or "").split(","):
+                addr = addr.strip().lower()
+                if addr and "@" in addr:
+                    existing_index.setdefault(f"em:{addr}", contact_id)
 
     needed = max_contacts - already
     results: list = []
@@ -427,7 +478,7 @@ def discover_and_create_contacts(
         logger.warning("No Forager org id for domain=%r — falling back to domain pagination", company_domain)
         return _discover_by_domain_pagination(
             hubspot_company_id, company_domain, job_title_filter,
-            max_contacts, needed, seen_person_ids, owner_id, results,
+            max_contacts, needed, seen_person_ids, owner_id, results, existing_index,
         )
 
     # --- Title-bucketed, parent-org-isolated discovery ---
@@ -475,7 +526,8 @@ def discover_and_create_contacts(
                 # people who genuinely hold a buyer-committee title.
                 if not buyer_committee.matches_buyer_committee_exact(role.get("role_title") or ""):
                     continue
-                res = _create_skeleton_from_role(role, hubspot_company_id, owner_id, seen_person_ids)
+                res = _create_skeleton_from_role(role, hubspot_company_id, owner_id,
+                                                 seen_person_ids, existing_index)
                 if res is None:
                     # Already-seen / duplicate person — keep scanning THIS title for a
                     # different, not-yet-created person before moving on.
@@ -528,6 +580,7 @@ def _discover_by_domain_pagination(
     seen_person_ids: set,
     owner_id,
     results: list,
+    existing_index: dict | None = None,
 ) -> list:
     """Fallback: the original domain-wide pagination (scan everyone, filter titles
     locally). Used only when the parent org id can't be resolved. Note this sweeps in
@@ -557,7 +610,8 @@ def _discover_by_domain_pagination(
             matches_found += 1
             if job_title_filter and job_title_filter.lower() not in role_title.lower():
                 continue
-            res = _create_skeleton_from_role(role, hubspot_company_id, owner_id, seen_person_ids)
+            res = _create_skeleton_from_role(role, hubspot_company_id, owner_id,
+                                             seen_person_ids, existing_index)
             if res is None:
                 continue
             results.append(res)
