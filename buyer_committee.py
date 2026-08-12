@@ -53,6 +53,22 @@ _TITLES = [
     "Founder", "Co-Founder",
     "President",
     "Chief Operating Officer", "COO",
+    # --- Decision Maker: Partnerships / Vendor management (Peter, Aug 2026) ---
+    # These roles own vendor selection and the commercial relationship for a
+    # data purchase, so they buy rather than influence. Moved up from the
+    # Influencer block for the same search-order reason as the CDO above, but
+    # placed AFTER the executive titles so a procurement manager is never
+    # searched ahead of a founder or CEO.
+    "Head of Partnerships", "VP Partnerships", "Vice President Partnerships",
+    "Director of Partnerships",
+    "Strategic Partnerships Manager", "Technology Partnerships Manager",
+    "Ecosystem Partnerships Manager",
+    "Head of Data Partnerships", "Director of Data Partnerships",
+    "Data Partnerships Manager",
+    "Partner Manager", "Partner Manager, Data Partnerships",
+    "Head of Business Development", "Director of Business Development",
+    "Vendor Manager, Data", "Procurement Manager, Data",
+    "Strategic Sourcing Manager, Data",
 
     # --- Champion: Core product managers ---
     "Product Manager", "Senior Product Manager", "Lead Product Manager",
@@ -107,17 +123,7 @@ _TITLES = [
     "Head of Applied AI", "Director of Applied AI",
     "Machine Learning Engineering Manager",
     "Lead Machine Learning Engineer", "Principal Machine Learning Engineer",
-    # --- Influencer: Partnerships / Vendor management ---
-    "Head of Partnerships", "VP Partnerships", "Vice President Partnerships",
-    "Director of Partnerships",
-    "Strategic Partnerships Manager", "Technology Partnerships Manager",
-    "Ecosystem Partnerships Manager",
-    "Head of Data Partnerships", "Director of Data Partnerships",
-    "Data Partnerships Manager",
-    "Partner Manager", "Partner Manager, Data Partnerships",
-    "Head of Business Development", "Director of Business Development",
-    "Vendor Manager, Data", "Procurement Manager, Data",
-    "Strategic Sourcing Manager, Data",
+    # (Partnerships / Vendor / Procurement moved up to Decision Maker, Peter Aug 2026)
 
     # --- Governance / Compliance (mapped, not primary outreach) ---
     "Head of Trust & Safety", "Head of Risk",
