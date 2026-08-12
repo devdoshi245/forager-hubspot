@@ -42,6 +42,12 @@ _TITLES = [
     "VP Platform", "Vice President Platform", "Vice President, Platform",
     "Head of Platform",
     "Director of Platform",
+    # --- Decision Maker: Data leadership (Peter, Aug 2026) ---
+    # A CDO owns the data budget, so they are a buyer rather than an influencer.
+    # Position matters: committee_titles() is searched in declared order, so
+    # moving this up means a CDO is found before the Champion titles fill the
+    # per-company contact quota.
+    "Chief Data Officer", "CDO",
     # --- Decision Maker: Executive (smaller companies) ---
     "Chief Executive Officer", "CEO",
     "Founder", "Co-Founder",
@@ -90,7 +96,7 @@ _TITLES = [
     "Lead Data Engineer", "Senior Data Engineer", "Principal Data Engineer",
     "Staff Data Engineer",
     # --- Influencer: Data leadership ---
-    "Chief Data Officer", "CDO",
+    # (Chief Data Officer / CDO moved up to Decision Maker, Peter Aug 2026)
     "VP Data", "Vice President Data",
     "Head of Data", "Director of Data",
     "Head of Data Products", "Director of Data Products",
