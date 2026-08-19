@@ -104,9 +104,10 @@ def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
     domain = (props.get("domain") or "").strip()
     name = (props.get("name") or "").strip()
     # Also accept a company LinkedIn URL as a resolver: when no domain is set,
-    # resolve the company by its LinkedIn handle (exact) — that fills in the
-    # website/domain + all other fields. When a domain IS set, the existing
-    # domain flow runs unchanged.
+    # resolve the company by its LinkedIn handle (exact). When a domain IS set,
+    # the domain flow runs first and the LinkedIn handle is the FALLBACK for
+    # when the domain search comes up empty (a company's real domain often
+    # differs from the one on its LinkedIn page).
     li_slug = _company_linkedin_slug(props.get("linkedin_company_page") or "")
 
     # Skip only if the company is BOTH enriched (forager_org_id) AND scored
@@ -124,15 +125,36 @@ def enrich_company(hubspot_company_id: str, force: bool = False) -> dict:
         domain=domain or None, name=name or None,
         linkedin_identifier=(li_slug if not domain else None),
     )
+    if not org and domain and li_slug:
+        # Domain search found nothing but a LinkedIn company page is on file —
+        # retry by the LinkedIn handle (Ahmed, 2026-08-18). Exact-slug
+        # validation inside search_organization rejects wrong companies.
+        org = forager.search_organization(linkedin_identifier=li_slug)
+    elif org and domain and li_slug:
+        # Wrong-company guard: Forager sometimes misattributes a domain (e.g.
+        # companies whose careers page lives on job-boards.greenhouse.io can
+        # carry domain=greenhouse.io — a search for that domain returns Medium).
+        # When the user supplied a LinkedIn page and the domain winner's own
+        # handle disagrees with it, the user's LinkedIn URL outranks the domain
+        # guess: prefer the exact slug match when one exists.
+        found_slug = forager._norm_slug(forager._org_linkedin_slug(org))
+        if found_slug and found_slug != forager._norm_slug(li_slug):
+            better = forager.search_organization(linkedin_identifier=li_slug)
+            if better:
+                org = better
     if not org:
-        return {"error": f"No Forager match for domain='{domain}' name='{name}' linkedin='{li_slug or ''}'"}
+        return {"error": f"No Forager match for domain='{domain}' name='{name}' "
+                         f"linkedin='{li_slug or ''}' (domain and LinkedIn lookups tried)"}
 
     fields = forager.parse_company_fields(org)
 
-    # Never overwrite values the user typed in by hand: Company Name, Website, and
-    # the LinkedIn company page are only filled when the HubSpot field is empty.
+    # Never overwrite values the user typed in by hand: Company Name, Website,
+    # Domain, and the LinkedIn company page are only filled when the HubSpot
+    # field is empty. Domain matters for the LinkedIn fallback: Forager's
+    # record may carry a different domain than the one entered in HubSpot —
+    # the mismatch is why the domain search failed — and it must not clobber it.
     # (Everything else — revenue, headcount, location, etc. — still updates.)
-    for key in ("name", "website", "linkedin_company_page"):
+    for key in ("name", "website", "domain", "linkedin_company_page"):
         if (props.get(key) or "").strip():
             fields.pop(key, None)
 
@@ -472,6 +494,14 @@ def discover_and_create_contacts(
     # Resolve the PARENT org id (the only thing that excludes same-domain subsidiaries).
     if not forager_org_id and company_domain:
         org = forager.search_organization(domain=company_domain)
+        if not org:
+            # Same LinkedIn-handle fallback as enrich_company: the company's
+            # real domain may differ from its LinkedIn page's domain.
+            comp = hubspot.get_company(hubspot_company_id) or {}
+            li_slug = _company_linkedin_slug(
+                (comp.get("properties", {}) or {}).get("linkedin_company_page") or "")
+            if li_slug:
+                org = forager.search_organization(linkedin_identifier=li_slug)
         forager_org_id = str((org or {}).get("id") or "") or None
 
     if not forager_org_id:
